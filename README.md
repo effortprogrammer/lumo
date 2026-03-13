@@ -12,13 +12,13 @@ Actor-Supervisor harness for monitored autonomous tasks.
   - `critical` → halt + alert
 - Uses unified natural-language intent routing (`start_task`, `followup`, `resume`, `halt`, `status`)
 - Supports channel integration (Discord gateway/webhook, Telegram inbound/outbound)
-- Runtime is **pi-mono only** (startup first attempts auto-bootstrap, then fails if the pi-mono health-check still fails)
+- Runtime is **pi-mono only** (startup runs configured `pi` runtime checks, then fails if the pi-mono health-check still fails)
 
 ## Requirements
 
 - Node.js 22+
 - npm
-- pi-mono runtime available/reachable
+- Installed `pi` toolchain available/reachable
 
 ## Install
 
@@ -30,7 +30,9 @@ npm run build
 npm link
 ```
 
-`npm install` now auto-installs the `pi-mono` dependency from GitHub (`badlogic/pi-mono`) as part of a fresh clone setup.
+`npm install` pulls pinned OpenClaw-style scoped `pi` packages from npm:
+`@mariozechner/pi-agent-core`, `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`, and `@mariozechner/pi-tui`.
+Lumo runtime startup uses the installed `pi` toolchain, not a checked-out GitHub monorepo under `node_modules/pi-mono`.
 
 If you prefer a one-shot global install instead of a link:
 
@@ -58,6 +60,11 @@ npm run link:global
 npm run install:global
 ```
 
+Migration note:
+If you previously relied on the GitHub `pi-mono` checkout or a bootstrap command such as
+`npm --prefix './node_modules/pi-mono' run build`, replace that with installed `pi` toolchain
+packages plus runtime checks like `pi --version` and `pi doctor`.
+
 ## Setup
 
 Interactive setup:
@@ -80,7 +87,7 @@ Wizard UX notes:
 lumo
 ```
 
-On startup, Lumo checks whether the `pi-mono` runtime is reachable. If the first health-check fails and auto-bootstrap is enabled, Lumo runs the configured bootstrap command list, waits briefly, and retries the health-check once before giving up.
+On startup, Lumo checks whether the `pi-mono` runtime is reachable. If the first health-check fails and auto-bootstrap is enabled, Lumo runs the configured runtime command list, waits briefly, and retries the health-check once before giving up.
 
 Or with an explicit config path:
 
@@ -115,7 +122,7 @@ After startup, type naturally:
 - Legacy runtime fallback is removed.
 - If `runtime.provider` is not `pi-mono`, startup fails fast.
 - If `runtime.bootstrap.enabled` is `false` or `LUMO_RUNTIME_AUTO_BOOTSTRAP=0`, Lumo keeps the existing fail-fast startup behavior with no bootstrap attempt.
-- Default bootstrap behavior is to detect the locally installed `pi-mono` dependency and run `npm --prefix './node_modules/pi-mono' run build`.
-- Override bootstrap commands in config with `runtime.bootstrap.commands` or via `LUMO_RUNTIME_BOOTSTRAP_COMMANDS`, using `;;` between commands, for example `export LUMO_RUNTIME_BOOTSTRAP_COMMANDS="pi-mono bootstrap ;; pi-mono doctor"`.
+- Default bootstrap behavior is to run safe runtime/toolchain checks against the installed `pi` CLI: `pi --version` and `pi doctor`.
+- Override bootstrap commands in config with `runtime.bootstrap.commands` or via `LUMO_RUNTIME_BOOTSTRAP_COMMANDS`, using `;;` between commands, for example `export LUMO_RUNTIME_BOOTSTRAP_COMMANDS="pi --version ;; pi doctor"`.
 - Tune the retry delay with `runtime.bootstrap.retryBackoffMs` or `LUMO_RUNTIME_BOOTSTRAP_RETRY_BACKOFF_MS`.
-- When bootstrap still fails, startup prints the attempted commands so you can run or replace them directly.
+- When startup checks still fail, Lumo prints the attempted commands so you can run, replace, or disable them directly during migration.

@@ -140,6 +140,11 @@ export interface CreateDefaultConfigOptions {
   cwd?: string;
 }
 
+const defaultPiToolchainStartupCommands = [
+  "pi --version",
+  "pi doctor",
+];
+
 export function createDefaultConfig(
   options: CreateDefaultConfigOptions = {},
 ): LumoConfig {
@@ -186,7 +191,7 @@ export function createDefaultConfig(
         enabled: parseBoolean(env.LUMO_RUNTIME_AUTO_BOOTSTRAP, true),
         commands: parseBootstrapCommands(
           env.LUMO_RUNTIME_BOOTSTRAP_COMMANDS,
-          detectDefaultPiMonoBootstrapCommands(cwd),
+          detectDefaultPiToolchainStartupCommands(cwd, env, resolveBinary),
         ),
         retryBackoffMs: parsePositiveInteger(
           env.LUMO_RUNTIME_BOOTSTRAP_RETRY_BACKOFF_MS,
@@ -565,15 +570,25 @@ function parseBootstrapCommands(
     .filter((entry) => entry.length > 0);
 }
 
-function detectDefaultPiMonoBootstrapCommands(cwd: string): string[] {
-  const packageRoot = resolve(cwd, "node_modules", "pi-mono");
-  if (!existsSync(resolve(packageRoot, "package.json"))) {
-    return [];
+function detectDefaultPiToolchainStartupCommands(
+  cwd: string,
+  env: Record<string, string | undefined>,
+  resolveBinary: BinaryResolver,
+): string[] {
+  const scopedPackages = [
+    "@mariozechner/pi-agent-core",
+    "@mariozechner/pi-ai",
+    "@mariozechner/pi-coding-agent",
+    "@mariozechner/pi-tui",
+  ];
+  const hasInstalledPiToolchainPackage = scopedPackages.some((packageName) => {
+    const packageRoot = resolve(cwd, "node_modules", packageName);
+    return existsSync(resolve(packageRoot, "package.json"));
+  });
+
+  if (hasInstalledPiToolchainPackage || resolveBinary(["pi"], { env })) {
+    return [...defaultPiToolchainStartupCommands];
   }
 
-  return [`npm --prefix ${quoteShellArgument(packageRoot)} run build`];
-}
-
-function quoteShellArgument(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+  return [];
 }

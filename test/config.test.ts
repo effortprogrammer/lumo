@@ -127,13 +127,16 @@ describe("loadConfig", () => {
 
   it("derives default command metadata from resolver fallback logic", () => {
     const config = createDefaultConfig({
-      resolveBinary: () => undefined,
+      resolveBinary: (candidates) => candidates[0] === "pi"
+        ? { candidate: "pi", path: "/usr/local/bin/pi" }
+        : undefined,
     });
 
     assert.equal(config.actor.browserRunner.metadata?.mode, "mock");
     assert.equal(config.actor.codingAgent.commands.codex.metadata?.mode, "mock");
     assert.equal(config.runtime.provider, "pi-mono");
     assert.equal(config.runtime.bootstrap.enabled, true);
+    assert.deepEqual(config.runtime.bootstrap.commands, ["pi --version", "pi doctor"]);
     assert.equal(config.supervisor.openaiCompatible.enabled, false);
     assert.deepEqual(config.channels.commandMapping.resume, ["resume"]);
     assert.equal(config.channels.intentRouting.startTaskConfidenceThreshold, 0.7);
@@ -144,7 +147,7 @@ describe("loadConfig", () => {
       env: {
         LUMO_RUNTIME_PROVIDER: "pi-mono",
         LUMO_RUNTIME_AUTO_BOOTSTRAP: "false",
-        LUMO_RUNTIME_BOOTSTRAP_COMMANDS: "pi-mono up ;; pi-mono verify",
+        LUMO_RUNTIME_BOOTSTRAP_COMMANDS: "pi --version ;; pi doctor",
         LUMO_RUNTIME_BOOTSTRAP_RETRY_BACKOFF_MS: "25",
         LUMO_CHANNELS_DISCORD_INBOUND_MODE: "gateway",
         LUMO_CHANNELS_DISCORD_BOT_TOKEN_ENV_VAR: "DISCORD_TOKEN",
@@ -163,7 +166,7 @@ describe("loadConfig", () => {
 
     assert.equal(config.runtime.provider, "pi-mono");
     assert.equal(config.runtime.bootstrap.enabled, false);
-    assert.deepEqual(config.runtime.bootstrap.commands, ["pi-mono up", "pi-mono verify"]);
+    assert.deepEqual(config.runtime.bootstrap.commands, ["pi --version", "pi doctor"]);
     assert.equal(config.runtime.bootstrap.retryBackoffMs, 25);
     assert.equal(config.channels.adapters.discord.inbound.mode, "gateway");
     assert.equal(config.channels.adapters.discord.inbound.tokenEnvVar, "DISCORD_TOKEN");

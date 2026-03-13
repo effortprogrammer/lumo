@@ -45,7 +45,7 @@ Completed on 2026-03-13.
 - Kept `LegacyRuntimeAdapter` only as a non-production compatibility scaffold; `SessionManager` now initializes pi-mono only.
 - Added strict pi-mono startup validation and health-check enforcement with explicit launch/config errors instead of silent fallback.
 - Narrowed config defaults and validation so `runtime.provider` must be `pi-mono`; legacy provider values now fail fast from env or config.
-- Updated terminal banner/help, README, and example config to document pi-mono-only runtime behavior.
+- Updated terminal banner/help, README, and example config to document pi-mono-only runtime behavior backed by installed `pi` npm packages instead of the GitHub monorepo dependency.
 - Updated adapter-focused tests to remove legacy fallback assumptions, add fail-fast coverage, and preserve deterministic pi-mono event mapping checks.
 
 ## Verification
@@ -61,7 +61,7 @@ Results:
 Real vs placeholder:
 
 - Real: Discord gateway inbound, Telegram adapter inbound/outbound, Discord setup healthcheck, terminal alerts, Discord webhook alerts, and critical voice-call alert dispatch.
-- Real: pi-mono is the only supported runtime in the startup and session-management path; legacy runtime execution has been removed/disabled from production selection.
+- Real: pi-mono is the only supported runtime in the startup and session-management path; legacy runtime execution has been removed/disabled from production selection, and startup defaults now target the installed `pi` toolchain instead of `node_modules/pi-mono`.
 - Placeholder: `LegacyRuntimeAdapter` remains in-tree only as a compatibility scaffold and contract reference, not as an active production runtime path.
 - Placeholder: `PiMonoSessionAdapter` remains a local scaffold until a real pi-mono client/runtime is connected.
 - Placeholder: Telegram alert-channel dispatch still returns an explicit skipped result until a dedicated alert delivery path is added.

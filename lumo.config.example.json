@@ -3,7 +3,7 @@
     "provider": "pi-mono",
     "bootstrap": {
       "enabled": true,
-      "commands": ["npm --prefix './node_modules/pi-mono' run build"],
+      "commands": ["pi --version", "pi doctor"],
       "retryBackoffMs": 250
     }
   },

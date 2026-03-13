@@ -494,7 +494,7 @@ export interface PiMonoBootstrapCommandAttempt {
 }
 
 const PI_MONO_STARTUP_FAILURE_MESSAGE =
-  "Pi-mono runtime health-check failed during startup. Ensure the pi-mono provider is configured and reachable before launching Lumo.";
+  "Pi-mono runtime health-check failed during startup. Ensure the installed pi toolchain is configured and reachable before launching Lumo.";
 
 export async function initializePiMonoRuntimeSessionAdapter(
   config: LumoConfig,
@@ -590,9 +590,9 @@ function formatPiMonoBootstrapFailureMessage(
       .join("; ");
 
   return [
-    "Pi-mono runtime health-check failed during startup after auto-bootstrap.",
+    "Pi-mono runtime health-check failed during startup after runtime command checks.",
     summary,
-    "Set runtime.bootstrap.commands or LUMO_RUNTIME_BOOTSTRAP_COMMANDS to the correct bootstrap command, or disable auto-bootstrap with runtime.bootstrap.enabled=false or LUMO_RUNTIME_AUTO_BOOTSTRAP=0.",
+    "Set runtime.bootstrap.commands or LUMO_RUNTIME_BOOTSTRAP_COMMANDS to the correct runtime command list, or disable auto-bootstrap with runtime.bootstrap.enabled=false or LUMO_RUNTIME_AUTO_BOOTSTRAP=0.",
   ].join(" ");
 }
 

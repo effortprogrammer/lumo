@@ -146,8 +146,8 @@ describe("initializePiMonoRuntimeSessionAdapter", () => {
       resolveBinary: () => undefined,
     });
     config.runtime.bootstrap.commands = [
-      "pi-mono bootstrap",
-      "pi-mono warmup",
+      "pi --version",
+      "pi doctor",
     ];
     config.runtime.bootstrap.retryBackoffMs = 25;
     const runner = new BootstrapRunner([
@@ -180,12 +180,12 @@ describe("initializePiMonoRuntimeSessionAdapter", () => {
     assert.equal(runner.calls.length, 2);
     assert.deepEqual(runner.calls[0], {
       command: "sh",
-      args: ["-lc", "pi-mono bootstrap"],
+      args: ["-lc", "pi --version"],
       cwd: "/tmp/bootstrap",
     });
     assert.deepEqual(runner.calls[1], {
       command: "sh",
-      args: ["-lc", "pi-mono warmup"],
+      args: ["-lc", "pi doctor"],
       cwd: "/tmp/bootstrap",
     });
     assert.deepEqual(sleepCalls, [25]);
@@ -201,8 +201,8 @@ describe("initializePiMonoRuntimeSessionAdapter", () => {
       resolveBinary: () => undefined,
     });
     config.runtime.bootstrap.commands = [
-      "pi-mono bootstrap",
-      "pi-mono doctor",
+      "pi --version",
+      "pi doctor",
     ];
     const runner = new BootstrapRunner([
       {
@@ -221,7 +221,7 @@ describe("initializePiMonoRuntimeSessionAdapter", () => {
         healthCheck: () => false,
         sleep: async () => {},
       }),
-      /Pi-mono runtime health-check failed during startup after auto-bootstrap.*pi-mono bootstrap.*port 7000 busy.*pi-mono doctor.*spawn ENOENT/is,
+      /Pi-mono runtime health-check failed during startup after runtime command checks.*pi --version.*port 7000 busy.*pi doctor.*spawn ENOENT/is,
     );
   });
 

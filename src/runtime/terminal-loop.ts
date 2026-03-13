@@ -130,7 +130,7 @@ function printBanner(config: LumoConfig): void {
 function printHelp(): void {
   writeOut("conversation: type what you want done, or say things like \"what's the status?\", \"continue\", or \"stop this run\"\n");
   writeOut("cli commands: config | logs | bridge | provider <name> | supervisor <mode> | smoke | help | exit\n");
-  writeOut("runtime: pi-mono is mandatory; startup fails if the pi-mono runtime health-check does not pass\n");
+  writeOut("runtime: pi-mono is mandatory; startup uses the installed pi toolchain and fails if the runtime health-check does not pass\n");
   writeOut("tool syntax inside a task: /bash <cmd>, /browser <cmd>, /agent <prompt>, or plain text for the coding agent\n");
 }
 
