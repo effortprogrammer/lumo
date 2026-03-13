@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { stdin as defaultInput, stdout as defaultOutput } from "node:process";
 import { dirname, resolve } from "node:path";
@@ -64,11 +65,34 @@ export interface SetupCliDependencies {
 
 export interface SetupPrompter {
   ask(question: string): Promise<string>;
+  select?(question: string, options: readonly string[], initialIndex?: number): Promise<number>;
   close(): void;
 }
 
 export interface TextWriter {
   write(text: string): void;
+}
+
+interface InteractiveInput {
+  isTTY?: boolean;
+  setRawMode?: (enabled: boolean) => void;
+  on(event: "keypress", listener: (text: string, key: KeyPress) => void): void;
+  off(event: "keypress", listener: (text: string, key: KeyPress) => void): void;
+  resume?(): void;
+}
+
+interface InteractiveOutput extends TextWriter {
+  isTTY?: boolean;
+}
+
+interface KeyPress {
+  name?: string;
+  ctrl?: boolean;
+}
+
+interface SelectChoice<TValue extends string> {
+  label: string;
+  value: TValue;
 }
 
 export interface WriteSetupConfigOptions {
@@ -78,6 +102,10 @@ export interface WriteSetupConfigOptions {
 
 const TRUE_VALUES = new Set(["1", "true", "yes", "y", "on"]);
 const FALSE_VALUES = new Set(["0", "false", "no", "n", "off"]);
+const YES_NO_CHOICES = [
+  { label: "Yes", value: "yes" },
+  { label: "No", value: "no" },
+] as const satisfies readonly SelectChoice<"yes" | "no">[];
 const silentWriter: TextWriter = {
   write(): void {},
 };
@@ -365,10 +393,11 @@ export async function runSetupCli(
               dependencies.output ?? defaultOutput,
             );
           try {
-            const response = await prompter.ask(
-              `Config file ${resolve(answers.configPath)} already exists. Overwrite? [y/N]: `,
+            return await promptBooleanSelect(
+              prompter,
+              `Config file ${resolve(answers.configPath)} already exists. Overwrite?`,
+              false,
             );
-            return parseBooleanString(response) ?? false;
           } finally {
             prompter.close();
           }
@@ -425,6 +454,7 @@ async function runInteractiveWizard(
   dependencies: SetupCliDependencies,
 ): Promise<SetupAnswers> {
   const defaults = createDefaultConfig();
+  const writer: TextWriter = dependencies.output ?? defaultOutput ?? silentWriter;
   const prompter = dependencies.createPrompter
     ? dependencies.createPrompter()
     : createReadlinePrompter(
@@ -443,9 +473,14 @@ async function runInteractiveWizard(
       "Actor model default",
       options.actorModel ?? defaults.actor.model,
     );
-    const supervisorClient = await promptWithDefault(
+    const supervisorClient = await promptSelectWithCustomInput(
       prompter,
-      "Supervisor client (mock|heuristic|openai-compatible)",
+      "Supervisor client",
+      [
+        { label: "mock", value: "mock" },
+        { label: "heuristic", value: "heuristic" },
+        { label: "openai-compatible", value: "openai-compatible" },
+      ],
       options.supervisorClient ?? defaults.supervisor.client,
     );
     const supervisorModel = await promptWithDefault(
@@ -472,9 +507,13 @@ async function runInteractiveWizard(
 
     if (discordEnabled) {
       discordInboundMode = parseDiscordInboundMode(
-        await promptWithDefault(
+        await promptSelectWithCustomInput(
           prompter,
-          "Discord inbound mode (file|gateway)",
+          "Discord inbound mode",
+          [
+            { label: "file", value: "file" },
+            { label: "gateway", value: "gateway" },
+          ],
           options.discordInboundMode ?? defaults.channels.adapters.discord.inbound.mode,
         ),
       );
@@ -526,7 +565,7 @@ async function runInteractiveWizard(
       ),
     );
 
-    return resolveSetupAnswers({
+    const answers = resolveSetupAnswers({
       ...options,
       configPath,
       actorModel,
@@ -541,6 +580,20 @@ async function runInteractiveWizard(
       mentionPrefix,
       enableTerminalAlerts: String(enableTerminalAlerts),
     });
+
+    writeLine(writer, "");
+    writeLine(writer, formatSetupSummary(answers));
+
+    const confirmed = await promptBooleanSelect(
+      prompter,
+      "Write this config file",
+      true,
+    );
+    if (!confirmed) {
+      throw new Error("Setup cancelled before writing config.");
+    }
+
+    return answers;
   } finally {
     prompter.close();
   }
@@ -558,6 +611,27 @@ function createReadlinePrompter(
   return {
     ask(question: string): Promise<string> {
       return readline.question(question);
+    },
+    async select(question: string, options: readonly string[], initialIndex = 0): Promise<number> {
+      const interactiveInput = asInteractiveInput(input);
+      const interactiveOutput = asInteractiveOutput(output);
+      if (
+        !interactiveInput ||
+        !interactiveOutput ||
+        !interactiveInput.isTTY ||
+        !interactiveOutput.isTTY ||
+        typeof interactiveInput.setRawMode !== "function"
+      ) {
+        return fallbackSelectPrompt(readline.question.bind(readline), question, options, initialIndex);
+      }
+
+      return renderInteractiveSelect(
+        interactiveInput,
+        interactiveOutput,
+        question,
+        options,
+        initialIndex,
+      );
     },
     close(): void {
       readline.close();
@@ -580,17 +654,142 @@ async function promptBoolean(
   label: string,
   fallback: boolean,
 ): Promise<boolean> {
-  const defaultLabel = fallback ? "Y/n" : "y/N";
+  return promptBooleanSelect(prompter, label, fallback);
+}
 
+async function promptBooleanSelect(
+  prompter: SetupPrompter,
+  label: string,
+  fallback: boolean,
+): Promise<boolean> {
+  const value = await promptSelectValue(
+    prompter,
+    label,
+    YES_NO_CHOICES,
+    fallback ? "yes" : "no",
+  );
+  return value === "yes";
+}
+
+async function promptSelectWithCustomInput<TValue extends string>(
+  prompter: SetupPrompter,
+  label: string,
+  choices: readonly SelectChoice<TValue>[],
+  fallback: string,
+): Promise<string> {
+  const customLabel = "Custom input...";
+  const fallbackIndex = choices.findIndex((choice) => choice.value === fallback);
+  const options = [
+    ...choices.map((choice) => choice.label),
+    customLabel,
+  ];
+
+  if (prompter.select) {
+    const selectedIndex = await prompter.select(
+      `${label} (use arrow keys, Enter to confirm)`,
+      options,
+      fallbackIndex >= 0 ? fallbackIndex : choices.length,
+    );
+    if (selectedIndex < choices.length) {
+      return choices[selectedIndex].value;
+    }
+  } else {
+    const selectedValue = await fallbackSelectValue(prompter, label, choices, fallback, true);
+    if (selectedValue != null) {
+      return selectedValue;
+    }
+  }
+
+  return requiredTrimmedValue(
+    await prompter.ask(`Custom value for ${label}: `),
+    label,
+  );
+}
+
+async function promptSelectValue<TValue extends string>(
+  prompter: SetupPrompter,
+  label: string,
+  choices: readonly SelectChoice<TValue>[],
+  fallback: TValue,
+): Promise<TValue> {
+  const fallbackIndex = choices.findIndex((choice) => choice.value === fallback);
+  if (prompter.select) {
+    const selectedIndex = await prompter.select(
+      `${label} (use arrow keys, Enter to confirm)`,
+      choices.map((choice) => choice.label),
+      fallbackIndex >= 0 ? fallbackIndex : 0,
+    );
+    return choices[selectedIndex]?.value ?? fallback;
+  }
+
+  const selectedValue = await fallbackSelectValue(prompter, label, choices, fallback, false);
+  return selectedValue ?? fallback;
+}
+
+async function fallbackSelectValue<TValue extends string>(
+  prompter: SetupPrompter,
+  label: string,
+  choices: readonly SelectChoice<TValue>[],
+  fallback: string,
+  allowCustomInput: boolean,
+): Promise<TValue | undefined> {
+  const renderedChoices = choices.map((choice, index) => `${index + 1}) ${choice.label}`).join(", ");
+  const defaultChoice = choices.find((choice) => choice.value === fallback)?.label ?? fallback;
   while (true) {
-    const response = await prompter.ask(`${label} [${defaultLabel}]: `);
-    const parsed = parseBooleanString(response);
-    if (parsed != null) {
-      return parsed;
+    const response = (await prompter.ask(
+      `${label} [${defaultChoice}] (${renderedChoices}${allowCustomInput ? ", custom" : ""}): `,
+    )).trim();
+
+    if (response.length === 0) {
+      const matchedFallback = choices.find((choice) => choice.value === fallback);
+      return matchedFallback?.value;
     }
 
-    if (response.trim().length === 0) {
-      return fallback;
+    const byIndex = Number(response);
+    if (Number.isInteger(byIndex) && byIndex >= 1 && byIndex <= choices.length) {
+      return choices[byIndex - 1]?.value;
+    }
+
+    const normalized = response.toLowerCase();
+    const matched = choices.find(
+      (choice) =>
+        choice.label.toLowerCase() === normalized || choice.value.toLowerCase() === normalized,
+    );
+    if (matched) {
+      return matched.value;
+    }
+
+    if (allowCustomInput && normalized === "custom") {
+      return undefined;
+    }
+  }
+}
+
+async function fallbackSelectPrompt(
+  ask: (question: string) => Promise<string>,
+  label: string,
+  options: readonly string[],
+  initialIndex: number,
+): Promise<number> {
+  const defaultIndex = normalizeSelectedIndex(initialIndex, options.length);
+  const defaultOption = options[defaultIndex] ?? options[0] ?? "";
+  const renderedChoices = options.map((option, index) => `${index + 1}) ${option}`).join(", ");
+  while (true) {
+    const response = (await ask(`${label} [${defaultOption}] (${renderedChoices}): `)).trim();
+    if (response.length === 0) {
+      return defaultIndex;
+    }
+
+    const byIndex = Number(response);
+    if (Number.isInteger(byIndex) && byIndex >= 1 && byIndex <= options.length) {
+      return byIndex - 1;
+    }
+
+    const matchedIndex = options.findIndex(
+      (option) => option.toLowerCase() === response.toLowerCase(),
+    );
+    if (matchedIndex >= 0) {
+      return matchedIndex;
     }
   }
 }
@@ -676,6 +875,156 @@ function splitCommaList(value: string | undefined): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function asInteractiveInput(input: unknown): InteractiveInput | undefined {
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    "on" in input &&
+    "off" in input
+  ) {
+    return input as InteractiveInput;
+  }
+
+  return undefined;
+}
+
+function asInteractiveOutput(output: unknown): InteractiveOutput | undefined {
+  if (
+    typeof output === "object" &&
+    output !== null &&
+    "write" in output
+  ) {
+    return output as InteractiveOutput;
+  }
+
+  return undefined;
+}
+
+async function renderInteractiveSelect(
+  input: InteractiveInput,
+  output: InteractiveOutput,
+  question: string,
+  options: readonly string[],
+  initialIndex: number,
+): Promise<number> {
+  const safeInitialIndex = normalizeSelectedIndex(initialIndex, options.length);
+  let selectedIndex = safeInitialIndex;
+  let renderedLineCount = 0;
+
+  const repaint = (): void => {
+    if (renderedLineCount > 0) {
+      output.write(`\x1b[${renderedLineCount}F`);
+    }
+
+    const lines = [
+      question,
+      ...options.map((option, index) => `${index === selectedIndex ? ">" : " "} ${option}`),
+    ];
+
+    for (const line of lines) {
+      output.write("\x1b[2K");
+      output.write(line);
+      output.write("\n");
+    }
+
+    renderedLineCount = lines.length;
+  };
+
+  return await new Promise<number>((resolveSelection, rejectSelection) => {
+    const onKeypress = (_text: string, key: KeyPress): void => {
+      if (key.ctrl && key.name === "c") {
+        cleanup();
+        rejectSelection(new Error("Setup cancelled before writing config."));
+        return;
+      }
+
+      if (key.name === "up") {
+        selectedIndex = moveSelectionIndex(selectedIndex, "up", options.length);
+        repaint();
+        return;
+      }
+
+      if (key.name === "down") {
+        selectedIndex = moveSelectionIndex(selectedIndex, "down", options.length);
+        repaint();
+        return;
+      }
+
+      if (key.name === "return" || key.name === "enter") {
+        cleanup();
+        output.write("\n");
+        resolveSelection(selectedIndex);
+      }
+    };
+
+    const cleanup = (): void => {
+      input.off("keypress", onKeypress);
+      input.setRawMode?.(false);
+    };
+
+    emitKeypressEvents(input);
+    input.resume?.();
+    input.setRawMode?.(true);
+    input.on("keypress", onKeypress);
+    repaint();
+  });
+}
+
+export function moveSelectionIndex(
+  currentIndex: number,
+  direction: "up" | "down",
+  optionCount: number,
+): number {
+  if (optionCount <= 0) {
+    return 0;
+  }
+
+  if (direction === "up") {
+    return (currentIndex - 1 + optionCount) % optionCount;
+  }
+
+  return (currentIndex + 1) % optionCount;
+}
+
+function normalizeSelectedIndex(index: number, optionCount: number): number {
+  if (optionCount <= 0) {
+    return 0;
+  }
+
+  if (index < 0) {
+    return 0;
+  }
+
+  if (index >= optionCount) {
+    return optionCount - 1;
+  }
+
+  return index;
+}
+
+export function formatSetupSummary(answers: SetupAnswers): string {
+  return [
+    "Setup summary",
+    "-------------",
+    `Config path: ${answers.configPath}`,
+    `Actor model: ${answers.actorModel}`,
+    `Supervisor client: ${answers.supervisorClient}`,
+    `Supervisor model: ${answers.supervisorModel}`,
+    `Discord enabled: ${answers.discordEnabled ? "Yes" : "No"}`,
+    `Discord inbound mode: ${answers.discordEnabled ? answers.discordInboundMode : "(disabled)"}`,
+    `Discord webhook URL: ${answers.webhookUrl ?? "(none)"}`,
+    `Discord token env var: ${answers.discordEnabled ? answers.tokenEnvVar : "(disabled)"}`,
+    `Allowed Discord channels: ${formatListSummary(answers.allowedChannels)}`,
+    `Allowed Discord users: ${formatListSummary(answers.allowedUsers)}`,
+    `Mention prefix: ${answers.mentionPrefix ?? "(none)"}`,
+    `Terminal alerts: ${answers.enableTerminalAlerts ? "Yes" : "No"}`,
+  ].join("\n");
+}
+
+function formatListSummary(values: readonly string[]): string {
+  return values.length > 0 ? values.join(", ") : "(none)";
 }
 
 function formatError(error: unknown): string {

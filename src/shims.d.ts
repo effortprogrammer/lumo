@@ -76,6 +76,10 @@ declare module "node:readline/promises" {
   };
 }
 
+declare module "node:readline" {
+  export function emitKeypressEvents(input: unknown): void;
+}
+
 declare module "react" {
   const React: {
     createElement: (...args: unknown[]) => unknown;

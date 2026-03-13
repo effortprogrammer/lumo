@@ -5,11 +5,14 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   buildSetupConfig,
+  formatSetupSummary,
+  moveSelectionIndex,
   parseSetupCliArgs,
   resolveSetupAnswers,
   runSetupCli,
   shouldRunDiscordGatewayHealthcheck,
   type SetupCliOptions,
+  type SetupPrompter,
   writeSetupConfig,
 } from "../src/setup/wizard.js";
 
@@ -239,6 +242,89 @@ describe("setup wizard", () => {
     );
   });
 
+  it("keeps selection helpers deterministic and summary output stable", () => {
+    assert.equal(moveSelectionIndex(0, "up", 2), 1);
+    assert.equal(moveSelectionIndex(1, "down", 2), 0);
+    assert.equal(moveSelectionIndex(0, "down", 3), 1);
+
+    const summary = formatSetupSummary({
+      configPath: "./lumo.config.json",
+      actorModel: "local-actor",
+      supervisorModel: "mock-supervisor",
+      supervisorClient: "mock",
+      discordEnabled: false,
+      discordInboundMode: "file",
+      tokenEnvVar: "DISCORD_TOKEN",
+      allowedChannels: [],
+      allowedUsers: [],
+      enableTerminalAlerts: false,
+    });
+
+    assert.match(summary, /^Setup summary/m);
+    assert.match(summary, /Discord enabled: No/);
+    assert.match(summary, /Allowed Discord channels: \(none\)/);
+  });
+
+  it("shows a summary and stops before writing when final confirmation is declined", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-confirm-"));
+    const configPath = join(tempDir, "lumo.config.json");
+    const writer = createBufferingWriter();
+
+    try {
+      const exitCode = await runSetupCli(["--config", configPath], {
+        output: writer,
+        error: writer,
+        createPrompter: () =>
+          createScriptedPrompter({
+            asks: ["", "", ""],
+            selects: [0, 1, 1, 1],
+          }),
+      });
+
+      assert.equal(exitCode, 1);
+      assert.match(writer.buffer, /Setup summary/);
+      assert.match(writer.buffer, /Setup cancelled before writing config\./);
+      await assert.rejects(() => readFile(configPath, "utf8"), /ENOENT|no such file/i);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves previous interactive defaults while adding selection prompts", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-defaults-"));
+    const configPath = join(tempDir, "lumo.config.json");
+
+    try {
+      const exitCode = await runSetupCli(["--config", configPath], {
+        output: createWriter(),
+        error: createWriter(),
+        createPrompter: () =>
+          createScriptedPrompter({
+            asks: ["", "", ""],
+            selects: [0, 1, 1, 0],
+          }),
+      });
+
+      assert.equal(exitCode, 0);
+
+      const raw = await readFile(configPath, "utf8");
+      const parsed = JSON.parse(raw) as {
+        actor: { model: string };
+        supervisor: { model: string; client: string };
+        channels: { adapters: { discord: { enabled: boolean } } };
+        alerts: { channels: { terminal: { enabled: boolean } } };
+      };
+
+      assert.equal(parsed.actor.model, "local-actor");
+      assert.equal(parsed.supervisor.model, "mock-supervisor");
+      assert.equal(parsed.supervisor.client, "mock");
+      assert.equal(parsed.channels.adapters.discord.enabled, false);
+      assert.equal(parsed.alerts.channels.terminal.enabled, false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports Discord gateway healthcheck pass and fail without failing setup", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-healthcheck-"));
     const passPath = join(tempDir, "pass.config.json");
@@ -346,5 +432,25 @@ function createBufferingWriter(): { buffer: string; write: (text: string) => voi
     write(text: string): void {
       this.buffer += text;
     },
+  };
+}
+
+function createScriptedPrompter(script: {
+  asks: string[];
+  selects: number[];
+}): SetupPrompter {
+  return {
+    async ask(): Promise<string> {
+      return script.asks.shift() ?? "";
+    },
+    async select(question: string, _options: readonly string[], initialIndex = 0): Promise<number> {
+      const selectedIndex = script.selects.shift();
+      if (selectedIndex == null) {
+        return initialIndex;
+      }
+
+      return selectedIndex;
+    },
+    close(): void {},
   };
 }

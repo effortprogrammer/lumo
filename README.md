@@ -68,6 +68,12 @@ lumo setup
 
 This creates `lumo.config.json`.
 
+Wizard UX notes:
+
+- Yes/No and enum choices use an interactive selector. Use the arrow keys to move and `Enter` to confirm.
+- Free-form text is still used for values like config path, model names, token env vars, and allowlists.
+- The wizard shows a final summary of all selected values and requires one last Yes/No confirmation before writing the file.
+
 ## Run
 
 ```bash
