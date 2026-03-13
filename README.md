@@ -16,7 +16,7 @@ Actor-Supervisor harness for monitored autonomous tasks.
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22+
 - npm
 - pi-mono runtime available/reachable
 
@@ -27,6 +27,8 @@ git clone https://github.com/effortprogrammer/lumo.git
 cd lumo
 npm install
 ```
+
+`npm install` now auto-installs the `pi-mono` dependency from GitHub (`badlogic/pi-mono`) as part of a fresh clone setup.
 
 ## Setup
 

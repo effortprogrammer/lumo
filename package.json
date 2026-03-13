@@ -29,6 +29,7 @@
     "agent-browser": "^0.17.1",
     "discord.js": "^14.18.0",
     "ink": "^5.2.1",
+    "pi-mono": "github:badlogic/pi-mono",
     "react": "^19.1.0"
   },
   "devDependencies": {
