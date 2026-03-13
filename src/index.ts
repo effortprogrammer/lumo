@@ -30,7 +30,7 @@ import { loadConfig } from "./config/load-config.js";
 import { runTerminalLoop } from "./runtime/terminal-loop.js";
 import { runSetupCli } from "./setup/wizard.js";
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   try {
     const args = process.argv.slice(2);
     if (args[0] === "setup") {

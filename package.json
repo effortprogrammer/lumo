@@ -5,11 +5,15 @@
   "description": "Actor-supervisor harness MVP for project Lumo",
   "type": "module",
   "bin": {
-    "lumo": "./dist/index.js"
+    "lumo": "./bin/lumo.js"
   },
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p tsconfig.json",
+    "cli": "node ./bin/lumo.js",
+    "setup": "node ./bin/lumo.js setup",
+    "link:global": "npm run build && npm link",
+    "install:global": "npm run build && npm i -g .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "npm run typecheck",
     "test": "npm run build && node --test dist/test/**/*.test.js",

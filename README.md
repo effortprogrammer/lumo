@@ -26,16 +26,44 @@ Actor-Supervisor harness for monitored autonomous tasks.
 git clone https://github.com/effortprogrammer/lumo.git
 cd lumo
 npm install
+npm run build
+npm link
 ```
 
 `npm install` now auto-installs the `pi-mono` dependency from GitHub (`badlogic/pi-mono`) as part of a fresh clone setup.
+
+If you prefer a one-shot global install instead of a link:
+
+```bash
+npm i -g .
+```
+
+After either `npm link` or `npm i -g .`, run the installed CLI directly:
+
+```bash
+lumo
+```
+
+You can also run setup first:
+
+```bash
+lumo setup
+```
+
+Convenience scripts:
+
+```bash
+npm run build
+npm run link:global
+npm run install:global
+```
 
 ## Setup
 
 Interactive setup:
 
 ```bash
-npm run dev -- setup
+lumo setup
 ```
 
 This creates `lumo.config.json`.
@@ -43,13 +71,26 @@ This creates `lumo.config.json`.
 ## Run
 
 ```bash
-npm run dev
+lumo
 ```
 
 Or with an explicit config path:
 
 ```bash
-npm run dev -- ./lumo.config.json
+lumo ./lumo.config.json
+```
+
+If you have not linked or globally installed the package yet, you can still run the built CLI locally:
+
+```bash
+npm run cli
+npm run setup
+```
+
+For a future published package, the equivalent no-install flow would be:
+
+```bash
+npx lumo
 ```
 
 ## Basic usage (natural language)
