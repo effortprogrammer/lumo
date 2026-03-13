@@ -1,0 +1,37 @@
+{
+  "name": "lumo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Actor-supervisor harness MVP for project Lumo",
+  "type": "module",
+  "bin": {
+    "lumo": "./dist/index.js"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "npm run typecheck",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "dev": "node --experimental-strip-types src/index.ts"
+  },
+  "keywords": [
+    "actor",
+    "supervisor",
+    "a2a",
+    "ink",
+    "harness"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "agent-browser": "^0.17.1",
+    "discord.js": "^14.18.0",
+    "ink": "^5.2.1",
+    "react": "^19.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

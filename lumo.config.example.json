@@ -1,0 +1,100 @@
+{
+  "runtime": {
+    "provider": "pi-mono"
+  },
+  "actor": {
+    "model": "local-actor",
+    "browserRunner": {
+      "command": "agent-browser",
+      "args": [],
+      "metadata": {
+        "mode": "binary"
+      }
+    },
+    "codingAgent": {
+      "provider": "codex",
+      "commands": {
+        "codex": {
+          "command": "codex",
+          "args": ["exec", "--skip-git-repo-check"]
+        },
+        "claude": {
+          "command": "claude",
+          "args": ["-p"]
+        },
+        "opencode": {
+          "command": "opencode",
+          "args": ["run"]
+        }
+      }
+    }
+  },
+  "supervisor": {
+    "client": "openai-compatible",
+    "openaiCompatible": {
+      "enabled": true,
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-4.1-mini",
+      "timeoutMs": 15000
+    }
+  },
+  "alerts": {
+    "enableTerminalBell": true,
+    "channels": {
+      "terminal": {
+        "enabled": true
+      },
+      "discord": {
+        "enabled": true,
+        "webhookUrl": "https://discord.com/api/webhooks/..."
+      },
+      "telegram": {
+        "enabled": false
+      },
+      "voiceCall": {
+        "enabled": false,
+        "recipient": "+15551234567",
+        "providerCommandTemplate": ["openclaw", "voice-call", "--to", "{recipient}", "--message", "{message}"]
+      }
+    }
+  },
+  "channels": {
+    "commandMapping": {
+      "new": ["new"],
+      "followup": ["followup"],
+      "resume": ["resume"],
+      "halt": ["halt"],
+      "status": ["status"]
+    },
+    "intentRouting": {
+      "modelResolver": "mock",
+      "startTaskConfidenceThreshold": 0.7
+    },
+    "adapters": {
+      "discord": {
+        "enabled": true,
+        "webhookUrl": "https://discord.com/api/webhooks/...",
+        "inbound": {
+          "mode": "gateway",
+          "tokenEnvVar": "LUMO_CHANNELS_DISCORD_BOT_TOKEN",
+          "allowedChannels": ["guild:123456789012345678/channel:234567890123456789"],
+          "allowedUsers": ["345678901234567890"],
+          "mentionPrefix": "@lumo",
+          "filePath": "./.lumo/discord-inbound.jsonl"
+        }
+      },
+      "telegram": {
+        "enabled": false,
+        "botToken": "123456:telegram-bot-token",
+        "chatId": "777777777",
+        "inbound": {
+          "pollIntervalMs": 1000,
+          "timeoutSeconds": 30,
+          "allowedChatIds": ["777777777"],
+          "allowedUserIds": ["123456789"],
+          "mentionPrefix": "@lumo"
+        }
+      }
+    }
+  }
+}
