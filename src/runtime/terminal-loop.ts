@@ -14,7 +14,7 @@ function writeOut(text: string): void {
   stdout?.write?.(text);
 }
 export async function runTerminalLoop(config: LumoConfig): Promise<void> {
-  const sessionManager = new SessionManager(config);
+  const sessionManager = await SessionManager.create(config);
   const adapters = createChannelAdapters(config);
   let router: ConversationRouter;
   router = new ConversationRouter({

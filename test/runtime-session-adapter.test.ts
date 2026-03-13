@@ -57,6 +57,37 @@ class AvailablePiMonoClient implements PiMonoRuntimeClient {
   }
 }
 
+class BootstrapRunner implements CommandRunner {
+  readonly calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+
+  constructor(
+    private readonly results: Array<
+      | {
+        stdout: string;
+        stderr: string;
+        exitCode: number | null;
+        durationMs: number;
+      }
+      | Error
+    >,
+  ) {}
+
+  async run(command: string, args: string[], options?: { cwd?: string }) {
+    this.calls.push({ command, args, cwd: options?.cwd });
+    const next = this.results.shift();
+    if (next instanceof Error) {
+      throw next;
+    }
+
+    return next ?? {
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      durationMs: 1,
+    };
+  }
+}
+
 describe("LegacyRuntimeAdapter", () => {
   it("implements the runtime session adapter contract for create/send/pause/resume/halt", async () => {
     const config = createDefaultConfig({
@@ -98,23 +129,108 @@ describe("LegacyRuntimeAdapter", () => {
 });
 
 describe("initializePiMonoRuntimeSessionAdapter", () => {
-  it("fails fast when the pi-mono runtime health-check is unavailable", () => {
+  it("fails fast when the pi-mono runtime health-check is unavailable and auto-bootstrap is disabled", async () => {
     const config = createDefaultConfig({
       resolveBinary: () => undefined,
     });
+    config.runtime.bootstrap.enabled = false;
 
-    assert.throws(
+    await assert.rejects(
       () => initializePiMonoRuntimeSessionAdapter(config),
       /Pi-mono runtime health-check failed during startup/i,
     );
   });
 
-  it("returns pi-mono when the scaffolded client reports availability", () => {
+  it("runs configured bootstrap commands, waits, and continues when the health-check recovers", async () => {
+    const config = createDefaultConfig({
+      resolveBinary: () => undefined,
+    });
+    config.runtime.bootstrap.commands = [
+      "pi-mono bootstrap",
+      "pi-mono warmup",
+    ];
+    config.runtime.bootstrap.retryBackoffMs = 25;
+    const runner = new BootstrapRunner([
+      {
+        stdout: "bootstrapped",
+        stderr: "",
+        exitCode: 0,
+        durationMs: 4,
+      },
+      {
+        stdout: "warmed",
+        stderr: "",
+        exitCode: 0,
+        durationMs: 5,
+      },
+    ]);
+    const sleepCalls: number[] = [];
+    const healthSequence = [false, true];
+
+    const adapter = await initializePiMonoRuntimeSessionAdapter(config, {
+      piMonoClient: new AvailablePiMonoClient(),
+      bootstrapRunner: runner,
+      healthCheck: () => healthSequence.shift() ?? true,
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+      },
+      cwd: "/tmp/bootstrap",
+    });
+
+    assert.equal(runner.calls.length, 2);
+    assert.deepEqual(runner.calls[0], {
+      command: "sh",
+      args: ["-lc", "pi-mono bootstrap"],
+      cwd: "/tmp/bootstrap",
+    });
+    assert.deepEqual(runner.calls[1], {
+      command: "sh",
+      args: ["-lc", "pi-mono warmup"],
+      cwd: "/tmp/bootstrap",
+    });
+    assert.deepEqual(sleepCalls, [25]);
+    const session = adapter.createSession({
+      instruction: "summarize repo",
+      cwd: "/tmp",
+    });
+    assert.equal(session.provider, "pi-mono");
+  });
+
+  it("includes attempted bootstrap commands in the startup error when health-check still fails", async () => {
+    const config = createDefaultConfig({
+      resolveBinary: () => undefined,
+    });
+    config.runtime.bootstrap.commands = [
+      "pi-mono bootstrap",
+      "pi-mono doctor",
+    ];
+    const runner = new BootstrapRunner([
+      {
+        stdout: "",
+        stderr: "port 7000 busy",
+        exitCode: 1,
+        durationMs: 3,
+      },
+      new Error("spawn ENOENT"),
+    ]);
+
+    await assert.rejects(
+      () => initializePiMonoRuntimeSessionAdapter(config, {
+        piMonoClient: new AvailablePiMonoClient(),
+        bootstrapRunner: runner,
+        healthCheck: () => false,
+        sleep: async () => {},
+      }),
+      /Pi-mono runtime health-check failed during startup after auto-bootstrap.*pi-mono bootstrap.*port 7000 busy.*pi-mono doctor.*spawn ENOENT/is,
+    );
+  });
+
+  it("returns pi-mono when the scaffolded client reports availability", async () => {
     const config = createDefaultConfig({
       resolveBinary: () => undefined,
     });
 
-    const adapter = initializePiMonoRuntimeSessionAdapter(config, {
+    const adapter = await initializePiMonoRuntimeSessionAdapter(config, {
       piMonoClient: new AvailablePiMonoClient(),
     });
 
@@ -128,13 +244,14 @@ describe("initializePiMonoRuntimeSessionAdapter", () => {
 });
 
 describe("SessionManager", () => {
-  it("fails fast during construction when pi-mono startup health-check fails", () => {
+  it("fails fast during construction when pi-mono startup health-check fails", async () => {
     const config = createDefaultConfig({
       resolveBinary: () => undefined,
     });
+    config.runtime.bootstrap.enabled = false;
 
-    assert.throws(
-      () => new SessionManager(config),
+    await assert.rejects(
+      () => SessionManager.create(config),
       /Pi-mono runtime health-check failed during startup/i,
     );
   });

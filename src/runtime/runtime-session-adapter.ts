@@ -478,12 +478,28 @@ export function mapPiMonoEventToLumoSessionEvents(
 export interface RuntimeAdapterSelectionOptions {
   now?: () => string;
   piMonoClient?: PiMonoRuntimeClient;
+  bootstrapRunner?: CommandRunner;
+  healthCheck?: () => boolean;
+  sleep?: (ms: number) => Promise<void>;
+  cwd?: string;
 }
 
-export function initializePiMonoRuntimeSessionAdapter(
+export interface PiMonoBootstrapCommandAttempt {
+  command: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  durationMs: number;
+  error?: string;
+}
+
+const PI_MONO_STARTUP_FAILURE_MESSAGE =
+  "Pi-mono runtime health-check failed during startup. Ensure the pi-mono provider is configured and reachable before launching Lumo.";
+
+export async function initializePiMonoRuntimeSessionAdapter(
   config: LumoConfig,
   options: RuntimeAdapterSelectionOptions = {},
-): RuntimeSessionAdapter {
+): Promise<RuntimeSessionAdapter> {
   if (config.runtime.provider !== "pi-mono") {
     throw new Error(
       `Unsupported runtime.provider "${String(config.runtime.provider)}". Lumo requires "pi-mono".`,
@@ -495,13 +511,99 @@ export function initializePiMonoRuntimeSessionAdapter(
     now: options.now,
   });
 
-  if (!piMono.isAvailable()) {
-    throw new Error(
-      "Pi-mono runtime health-check failed during startup. Ensure the pi-mono provider is configured and reachable before launching Lumo.",
-    );
+  const healthCheck = options.healthCheck ?? (() => piMono.isAvailable());
+  if (healthCheck()) {
+    return piMono;
   }
 
-  return piMono;
+  if (!config.runtime.bootstrap.enabled) {
+    throw new Error(PI_MONO_STARTUP_FAILURE_MESSAGE);
+  }
+
+  const attempts = await runPiMonoBootstrap(config, {
+    cwd: options.cwd ?? process.cwd(),
+    runner: options.bootstrapRunner ?? new SubprocessCommandRunner(),
+  });
+
+  await (options.sleep ?? defaultSleep)(config.runtime.bootstrap.retryBackoffMs);
+  if (healthCheck()) {
+    return piMono;
+  }
+
+  throw new Error(formatPiMonoBootstrapFailureMessage(attempts));
+}
+
+async function runPiMonoBootstrap(
+  config: LumoConfig,
+  options: {
+    cwd: string;
+    runner: CommandRunner;
+  },
+): Promise<PiMonoBootstrapCommandAttempt[]> {
+  const attempts: PiMonoBootstrapCommandAttempt[] = [];
+  for (const command of config.runtime.bootstrap.commands) {
+    try {
+      const result = await options.runner.run("sh", ["-lc", command], {
+        cwd: options.cwd,
+      });
+      attempts.push({
+        command,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+      });
+    } catch (error) {
+      attempts.push({
+        command,
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        durationMs: 0,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return attempts;
+}
+
+function formatPiMonoBootstrapFailureMessage(
+  attempts: PiMonoBootstrapCommandAttempt[],
+): string {
+  const summary = attempts.length === 0
+    ? "No bootstrap commands were configured or detected."
+    : attempts
+      .map((attempt, index) => {
+        const parts = [
+          `[${index + 1}] ${attempt.command}`,
+          `exit=${attempt.exitCode === null ? "error" : attempt.exitCode}`,
+        ];
+        if (attempt.error) {
+          parts.push(`error=${attempt.error}`);
+        }
+        if (attempt.stderr) {
+          parts.push(`stderr=${truncateForError(attempt.stderr)}`);
+        }
+        return parts.join(" ");
+      })
+      .join("; ");
+
+  return [
+    "Pi-mono runtime health-check failed during startup after auto-bootstrap.",
+    summary,
+    "Set runtime.bootstrap.commands or LUMO_RUNTIME_BOOTSTRAP_COMMANDS to the correct bootstrap command, or disable auto-bootstrap with runtime.bootstrap.enabled=false or LUMO_RUNTIME_AUTO_BOOTSTRAP=0.",
+  ].join(" ");
+}
+
+function truncateForError(value: string): string {
+  return value.length <= 160 ? JSON.stringify(value) : `${JSON.stringify(value.slice(0, 157))}...`;
+}
+
+async function defaultSleep(ms: number): Promise<void> {
+  await new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 export function createTaskPairing(

@@ -19,6 +19,11 @@ export interface CommandSpec {
 export interface LumoConfig {
   runtime: {
     provider: "pi-mono";
+    bootstrap: {
+      enabled: boolean;
+      commands: string[];
+      retryBackoffMs: number;
+    };
   };
   actor: {
     model: string;
@@ -132,6 +137,7 @@ const defaultBrowserScript = [
 export interface CreateDefaultConfigOptions {
   env?: Record<string, string | undefined>;
   resolveBinary?: BinaryResolver;
+  cwd?: string;
 }
 
 export function createDefaultConfig(
@@ -139,6 +145,7 @@ export function createDefaultConfig(
 ): LumoConfig {
   const env = options.env ?? process.env;
   const resolveBinary = options.resolveBinary ?? resolveBinaryCommand;
+  const cwd = options.cwd ?? process.cwd();
 
   const defaultAgentCommand = (provider: CodingAgentProvider): CommandSpec => {
     const resolved = resolveBinary([provider], { env });
@@ -175,6 +182,17 @@ export function createDefaultConfig(
   return {
     runtime: {
       provider: parseRuntimeProvider(env.LUMO_RUNTIME_PROVIDER),
+      bootstrap: {
+        enabled: parseBoolean(env.LUMO_RUNTIME_AUTO_BOOTSTRAP, true),
+        commands: parseBootstrapCommands(
+          env.LUMO_RUNTIME_BOOTSTRAP_COMMANDS,
+          detectDefaultPiMonoBootstrapCommands(cwd),
+        ),
+        retryBackoffMs: parsePositiveInteger(
+          env.LUMO_RUNTIME_BOOTSTRAP_RETRY_BACKOFF_MS,
+          250,
+        ),
+      },
     },
     actor: {
       model: "local-actor",
@@ -312,6 +330,12 @@ export function mergeConfig(
     runtime: {
       ...defaults.runtime,
       ...overrides.runtime,
+      bootstrap: {
+        ...defaults.runtime.bootstrap,
+        ...overrides.runtime?.bootstrap,
+        commands:
+          overrides.runtime?.bootstrap?.commands ?? defaults.runtime.bootstrap.commands,
+      },
     },
     actor: {
       ...defaults.actor,
@@ -485,6 +509,23 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (!value) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 function parseRuntimeProvider(value: string | undefined): "pi-mono" {
   if (!value || value === "pi-mono") {
     return "pi-mono";
@@ -508,4 +549,31 @@ function parseStringList(value: string | undefined): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function parseBootstrapCommands(
+  value: string | undefined,
+  fallback: string[],
+): string[] {
+  if (!value) {
+    return fallback;
+  }
+
+  return value
+    .split(";;")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function detectDefaultPiMonoBootstrapCommands(cwd: string): string[] {
+  const packageRoot = resolve(cwd, "node_modules", "pi-mono");
+  if (!existsSync(resolve(packageRoot, "package.json"))) {
+    return [];
+  }
+
+  return [`npm --prefix ${quoteShellArgument(packageRoot)} run build`];
+}
+
+function quoteShellArgument(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

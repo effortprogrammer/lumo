@@ -12,7 +12,7 @@ Actor-Supervisor harness for monitored autonomous tasks.
   - `critical` → halt + alert
 - Uses unified natural-language intent routing (`start_task`, `followup`, `resume`, `halt`, `status`)
 - Supports channel integration (Discord gateway/webhook, Telegram inbound/outbound)
-- Runtime is **pi-mono only** (startup fails if pi-mono health-check fails)
+- Runtime is **pi-mono only** (startup first attempts auto-bootstrap, then fails if the pi-mono health-check still fails)
 
 ## Requirements
 
@@ -80,6 +80,8 @@ Wizard UX notes:
 lumo
 ```
 
+On startup, Lumo checks whether the `pi-mono` runtime is reachable. If the first health-check fails and auto-bootstrap is enabled, Lumo runs the configured bootstrap command list, waits briefly, and retries the health-check once before giving up.
+
 Or with an explicit config path:
 
 ```bash
@@ -112,3 +114,8 @@ After startup, type naturally:
 
 - Legacy runtime fallback is removed.
 - If `runtime.provider` is not `pi-mono`, startup fails fast.
+- If `runtime.bootstrap.enabled` is `false` or `LUMO_RUNTIME_AUTO_BOOTSTRAP=0`, Lumo keeps the existing fail-fast startup behavior with no bootstrap attempt.
+- Default bootstrap behavior is to detect the locally installed `pi-mono` dependency and run `npm --prefix './node_modules/pi-mono' run build`.
+- Override bootstrap commands in config with `runtime.bootstrap.commands` or via `LUMO_RUNTIME_BOOTSTRAP_COMMANDS`, using `;;` between commands, for example `export LUMO_RUNTIME_BOOTSTRAP_COMMANDS="pi-mono bootstrap ;; pi-mono doctor"`.
+- Tune the retry delay with `runtime.bootstrap.retryBackoffMs` or `LUMO_RUNTIME_BOOTSTRAP_RETRY_BACKOFF_MS`.
+- When bootstrap still fails, startup prints the attempted commands so you can run or replace them directly.

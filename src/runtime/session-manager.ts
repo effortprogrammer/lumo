@@ -27,14 +27,24 @@ export class SessionManager {
   private unsubscribeCurrentSession: (() => void) | null = null;
   private readonly runtimeAdapter: RuntimeSessionAdapter;
 
-  constructor(
+  private constructor(
     private readonly config: LumoConfig,
     private readonly runner: CommandRunner = new SubprocessCommandRunner(),
     private readonly now: () => string = () => new Date().toISOString(),
+    runtimeAdapter: RuntimeSessionAdapter,
   ) {
-    this.runtimeAdapter = initializePiMonoRuntimeSessionAdapter(this.config, {
-      now: this.now,
+    this.runtimeAdapter = runtimeAdapter;
+  }
+
+  static async create(
+    config: LumoConfig,
+    runner: CommandRunner = new SubprocessCommandRunner(),
+    now: () => string = () => new Date().toISOString(),
+  ): Promise<SessionManager> {
+    const runtimeAdapter = await initializePiMonoRuntimeSessionAdapter(config, {
+      now,
     });
+    return new SessionManager(config, runner, now, runtimeAdapter);
   }
 
   get current(): TaskSession | null {

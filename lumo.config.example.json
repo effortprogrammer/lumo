@@ -1,6 +1,11 @@
 {
   "runtime": {
-    "provider": "pi-mono"
+    "provider": "pi-mono",
+    "bootstrap": {
+      "enabled": true,
+      "commands": ["npm --prefix './node_modules/pi-mono' run build"],
+      "retryBackoffMs": 250
+    }
   },
   "actor": {
     "model": "local-actor",

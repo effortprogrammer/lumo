@@ -14,6 +14,7 @@ describe("loadConfig", () => {
     assert.equal(config.runtime.provider, "pi-mono");
     assert.equal(config.actor.codingAgent.provider, "codex");
     assert.equal(config.supervisor.client, "mock");
+    assert.equal(config.runtime.bootstrap.enabled, true);
   });
 
   it("merges json overrides onto defaults", async () => {
@@ -26,6 +27,11 @@ describe("loadConfig", () => {
         JSON.stringify({
           runtime: {
             provider: "pi-mono",
+            bootstrap: {
+              enabled: false,
+              commands: ["custom-bootstrap --start"],
+              retryBackoffMs: 50,
+            },
           },
           actor: {
             model: "custom-actor",
@@ -85,6 +91,9 @@ describe("loadConfig", () => {
       const defaults = createDefaultConfig();
 
       assert.equal(config.runtime.provider, "pi-mono");
+      assert.equal(config.runtime.bootstrap.enabled, false);
+      assert.deepEqual(config.runtime.bootstrap.commands, ["custom-bootstrap --start"]);
+      assert.equal(config.runtime.bootstrap.retryBackoffMs, 50);
       assert.equal(config.actor.model, "custom-actor");
       assert.equal(config.actor.codingAgent.provider, "claude");
       assert.equal(config.supervisor.client, "openai-compatible");
@@ -124,6 +133,7 @@ describe("loadConfig", () => {
     assert.equal(config.actor.browserRunner.metadata?.mode, "mock");
     assert.equal(config.actor.codingAgent.commands.codex.metadata?.mode, "mock");
     assert.equal(config.runtime.provider, "pi-mono");
+    assert.equal(config.runtime.bootstrap.enabled, true);
     assert.equal(config.supervisor.openaiCompatible.enabled, false);
     assert.deepEqual(config.channels.commandMapping.resume, ["resume"]);
     assert.equal(config.channels.intentRouting.startTaskConfidenceThreshold, 0.7);
@@ -133,6 +143,9 @@ describe("loadConfig", () => {
     const config = createDefaultConfig({
       env: {
         LUMO_RUNTIME_PROVIDER: "pi-mono",
+        LUMO_RUNTIME_AUTO_BOOTSTRAP: "false",
+        LUMO_RUNTIME_BOOTSTRAP_COMMANDS: "pi-mono up ;; pi-mono verify",
+        LUMO_RUNTIME_BOOTSTRAP_RETRY_BACKOFF_MS: "25",
         LUMO_CHANNELS_DISCORD_INBOUND_MODE: "gateway",
         LUMO_CHANNELS_DISCORD_BOT_TOKEN_ENV_VAR: "DISCORD_TOKEN",
         LUMO_CHANNELS_DISCORD_ALLOWED_CHANNELS: "guild:g-1/channel:c-1,thread:t-1",
@@ -149,6 +162,9 @@ describe("loadConfig", () => {
     });
 
     assert.equal(config.runtime.provider, "pi-mono");
+    assert.equal(config.runtime.bootstrap.enabled, false);
+    assert.deepEqual(config.runtime.bootstrap.commands, ["pi-mono up", "pi-mono verify"]);
+    assert.equal(config.runtime.bootstrap.retryBackoffMs, 25);
     assert.equal(config.channels.adapters.discord.inbound.mode, "gateway");
     assert.equal(config.channels.adapters.discord.inbound.tokenEnvVar, "DISCORD_TOKEN");
     assert.deepEqual(config.channels.adapters.discord.inbound.allowedChannels, [
