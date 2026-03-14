@@ -46,11 +46,7 @@ After either `npm link` or `npm i -g .`, run the installed CLI directly:
 lumo
 ```
 
-You can also run setup first:
-
-```bash
-lumo setup
-```
+If `lumo.config.json` does not exist, Lumo automatically opens setup and writes config before continuing.
 
 Convenience scripts:
 
@@ -67,13 +63,14 @@ packages plus runtime checks like `pi --version` and `pi doctor`.
 
 ## Setup
 
-Interactive setup:
+First run: just execute `lumo`.
+If config is missing, setup starts automatically and writes `lumo.config.json`.
+
+Manual setup is also available:
 
 ```bash
 lumo setup
 ```
-
-This creates `lumo.config.json`.
 
 Wizard UX notes:
 

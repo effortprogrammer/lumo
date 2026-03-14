@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 export * from "./a2a/in-process-adapter.js";
 export * from "./a2a/protocol.js";
 export * from "./alerts/dispatcher.js";
@@ -38,7 +39,18 @@ export async function main(): Promise<void> {
       return;
     }
 
-    const config = await loadConfig(args[0] ?? "lumo.config.json");
+    const configPath = args[0] ?? "lumo.config.json";
+    if (!existsSync(configPath)) {
+      console.log(`No config found at ${configPath}. Launching setup...`);
+      const setupExitCode = await runSetupCli(["--config", configPath]);
+      if (setupExitCode !== 0) {
+        console.error("Setup cancelled. Run `lumo setup` to configure and try again.");
+        process.exitCode = setupExitCode || 1;
+        return;
+      }
+    }
+
+    const config = await loadConfig(configPath);
     await runTerminalLoop(config);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
