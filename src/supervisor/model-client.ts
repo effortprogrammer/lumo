@@ -59,11 +59,7 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
       completionState: input.completionState,
     });
     const latestLog = recentLogs.at(-1);
-    if (
-      taskPhase.currentPhase === "completed"
-      && input.completionState?.contract.requiresArtifacts
-      && input.completionState.satisfied
-    ) {
+    if (taskPhase.currentPhase === "completed" && input.completionState?.satisfied) {
       return {
         status: "ok",
         confidence: Math.max(taskPhase.confidence, 0.95),

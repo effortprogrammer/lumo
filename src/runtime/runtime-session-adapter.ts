@@ -37,7 +37,10 @@ import { type CommandRunner, SubprocessCommandRunner } from "./subprocess.js";
 import { createTaskPairRuntimeState, type TaskPairRuntimeState } from "./task-pair-state.js";
 import {
   applyArtifactClaim,
+  applyCompletionSignal,
   createCompletionState,
+  extractCompletionSignalsFromConversation,
+  extractCompletionSignalsFromTool,
   extractArtifactClaim,
   inferCompletionContract,
   summarizeCompletionState,
@@ -489,6 +492,24 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
         }
       }
       this.emit(record.listeners, mappedEvent);
+      if (
+        mappedEvent.type === "conversation"
+        && mappedEvent.turn.role === "actor"
+        && record.session.pairState.completion?.satisfied
+      ) {
+        this.publishSupervisorProgress(record, {
+          summary: mappedEvent.turn.text.slice(0, 200),
+        });
+        void this.consumeSupervisorBatch(record, {
+          taskInstruction: record.session.task.context.instruction.text,
+          conversationHistory: record.session.task.context.conversationHistory.map((turn) => turn.text),
+          batch: record.session.actorLogs.slice(-10),
+          recentLogs: record.session.actorLogs.slice(-10),
+          anomalies: [],
+          completionState: record.session.pairState.completion,
+          triggeredBy: "manual",
+        });
+      }
     }
 
     if (event.type === "session.status") {
@@ -1023,6 +1044,13 @@ export function mapPiMonoEventToLumoSessionEvents(
         artifactClaim,
       );
     }
+    for (const signal of extractCompletionSignalsFromTool(record)) {
+      session.pairState.completion = applyCompletionSignal(
+        session.pairState.completion ?? createCompletionState(inferCompletionContract(session.task.context.instruction.text)),
+        signal,
+        event.occurredAt,
+      );
+    }
     return [{
       type: "log",
       sessionId: session.sessionId,
@@ -1054,6 +1082,15 @@ export function mapPiMonoEventToLumoSessionEvents(
   session.task.task.lastUpdatedAt = event.turn.timestamp;
   if (event.turn.role === "human" || event.turn.role === "supervisor") {
     session.pairState.actor.lastInputAt = event.turn.timestamp;
+  }
+  if (event.turn.role === "actor") {
+    for (const signal of extractCompletionSignalsFromConversation(event.turn.text)) {
+      session.pairState.completion = applyCompletionSignal(
+        session.pairState.completion ?? createCompletionState(inferCompletionContract(session.task.context.instruction.text)),
+        signal,
+        event.turn.timestamp,
+      );
+    }
   }
   return [{
     type: "conversation",

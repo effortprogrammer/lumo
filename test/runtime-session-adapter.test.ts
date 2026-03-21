@@ -738,6 +738,82 @@ describe("SessionManager", () => {
     assert.ok(statuses.includes("completed"));
     assert.ok(client.haltCalls.some((call) => call.reason === "Task completed by supervisor"));
   });
+
+  it("marks summary-only tasks completed when the actor emits a substantive final response", async () => {
+    const config = createDefaultConfig();
+    config.supervisor.client = "heuristic";
+    config.batch.maxSteps = 1;
+    const client = new SupervisablePiMonoClient();
+    const manager = await SessionManager.create(config, undefined, undefined, {
+      healthCheck: () => true,
+      piMonoClient: client,
+    });
+
+    const session = manager.createTask("산업기능요원 출국 절차를 조사해서 정리해줘");
+    const externalSessionId = `external-${session.runtime.sessionId}`;
+
+    client.emit(externalSessionId, {
+      type: "session.started",
+      taskId: session.runtime.task.task.taskId,
+      startedAt: "2026-03-21T12:10:00Z",
+    });
+    client.emit(externalSessionId, {
+      type: "conversation.turn",
+      taskId: session.runtime.task.task.taskId,
+      turn: {
+        id: "turn-actor-1",
+        role: "actor",
+        text: "산업기능요원의 국외여행 절차를 정리하면 다음과 같습니다. 먼저 병무청 허가 필요 여부를 확인하고, 회사 추천서와 신청서를 준비한 다음 출국 전 허가서를 출력해 보관해야 합니다. 마지막으로 허가 기간과 귀국 일정을 맞춰 복무에 지장이 없게 관리해야 합니다.",
+        timestamp: "2026-03-21T12:10:02Z",
+      },
+    });
+
+    await waitForAsyncWork();
+    await waitForAsyncWork();
+    await waitForAsyncWork();
+
+    assert.equal(session.runtime.task.task.status, "completed");
+    assert.equal(session.pairState.completion?.satisfied, true);
+    assert.ok(session.pairState.completion?.observedSignals.includes("summary_response"));
+  });
+
+  it("marks code-change tasks completed when relevant source files are updated", async () => {
+    const config = createDefaultConfig();
+    config.supervisor.client = "heuristic";
+    config.batch.maxSteps = 1;
+    const client = new SupervisablePiMonoClient();
+    const manager = await SessionManager.create(config, undefined, undefined, {
+      healthCheck: () => true,
+      piMonoClient: client,
+    });
+
+    const session = manager.createTask("로그인 버그를 수정해줘");
+    const externalSessionId = `external-${session.runtime.sessionId}`;
+
+    client.emit(externalSessionId, {
+      type: "session.started",
+      taskId: session.runtime.task.task.taskId,
+      startedAt: "2026-03-21T12:20:00Z",
+    });
+    client.emit(externalSessionId, {
+      type: "task.output",
+      taskId: session.runtime.task.task.taskId,
+      occurredAt: "2026-03-21T12:20:01Z",
+      tool: "coding-agent",
+      input: '{"path":"/tmp/auth.ts","content":"export function login() { return true; }"}',
+      output: "Successfully wrote 42 bytes to /tmp/auth.ts",
+      durationMs: 1,
+      exitCode: 0,
+    });
+
+    await waitForAsyncWork();
+    await waitForAsyncWork();
+    await waitForAsyncWork();
+
+    assert.equal(session.runtime.task.task.status, "completed");
+    assert.equal(session.pairState.completion?.satisfied, true);
+    assert.ok(session.pairState.completion?.observedSignals.includes("code_change"));
+  });
 });
 
 describe("mapPiMonoEventToLumoSessionEvents", () => {

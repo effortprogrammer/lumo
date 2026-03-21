@@ -57,7 +57,7 @@ export function assessTaskPhase(
   const hasEnoughResearchSignals = browserLogs.length >= 4;
   const distinctCollectionItems = countDistinctCollectionItems(context.recentLogs);
 
-  if (context.completionState?.contract.requiresArtifacts && context.completionState.satisfied) {
+  if (context.completionState?.satisfied) {
     return {
       currentPhase: "completed",
       confidence: 0.96,
@@ -82,7 +82,7 @@ export function assessTaskPhase(
   }
 
   if (codingLogs.length > 0 && wantsArtifact) {
-    if (context.completionState?.contract.requiresArtifacts && (context.completionState.artifacts.length ?? 0) > 0) {
+    if (context.completionState && (context.completionState.artifacts.length > 0 || context.completionState.observedSignals.length > 0)) {
       return {
         currentPhase: "verifying",
         confidence: 0.84,
@@ -94,6 +94,7 @@ export function assessTaskPhase(
           instructions: [
             "Stop broad browsing and verify the requested deliverables against the original task.",
             `Confirm whether the completion contract is satisfied. Missing kinds: ${context.completionState?.missingArtifactKinds.join(", ") || "none"}.`,
+            `Confirm whether any non-artifact signals are still missing: ${context.completionState?.missingSignals.join(", ") || "none"}.`,
             "If the contract is satisfied, finalize the task instead of continuing research.",
           ],
         },

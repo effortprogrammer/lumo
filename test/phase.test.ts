@@ -97,6 +97,7 @@ describe("assessTaskPhase", () => {
           requiresArtifacts: true,
           minimumArtifacts: 2,
           requiredArtifactKinds: ["draft", "summary"],
+          requiredSignals: [],
         },
         artifacts: [{
           path: "/tmp/국외여행허가추천서_초안.txt",
@@ -104,8 +105,10 @@ describe("assessTaskPhase", () => {
           createdAt: "2026-03-21T00:00:00Z",
           sourceTool: "coding-agent",
         }],
+        observedSignals: [],
         satisfied: false,
         missingArtifactKinds: ["summary"],
+        missingSignals: [],
       },
       recentLogs: [createCodingLog()],
     });
@@ -121,6 +124,7 @@ describe("assessTaskPhase", () => {
           requiresArtifacts: true,
           minimumArtifacts: 2,
           requiredArtifactKinds: ["draft", "summary"],
+          requiredSignals: [],
         },
         artifacts: [
           {
@@ -136,8 +140,10 @@ describe("assessTaskPhase", () => {
             sourceTool: "coding-agent",
           },
         ],
+        observedSignals: [],
         satisfied: true,
         missingArtifactKinds: [],
+        missingSignals: [],
         lastSatisfiedAt: "2026-03-21T00:00:01Z",
       },
       recentLogs: [createCodingLog()],
