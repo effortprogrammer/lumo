@@ -11,7 +11,6 @@ export type CodingAgentProvider = "codex" | "claude" | "opencode";
 
 export interface ActorProfile {
   id: string;
-  model: string;
   systemPrompt: string;
   tools: ActorToolName[];
 }
@@ -37,6 +36,90 @@ export interface ScreenshotRef {
   path?: string;
   url?: string;
   capturedAt: string;
+}
+
+export type BrowserPageKind =
+  | "homepage"
+  | "search_results"
+  | "job_listing"
+  | "job_detail"
+  | "login_wall"
+  | "modal"
+  | "article"
+  | "unknown";
+
+export interface BrowserStateSnapshot {
+  url?: string;
+  title?: string;
+  pageKind: BrowserPageKind;
+  lastAction?: string;
+  lastActionAt?: string;
+  lastMeaningfulChangeAt?: string;
+  extractedTextHints?: string[];
+  screenshotRef?: ScreenshotRef;
+  metadata?: Record<string, unknown>;
+}
+
+export interface BrowserProgressAssessment {
+  state: "advancing" | "stalled" | "unclear";
+  goalRelevance: "high" | "medium" | "low" | "unknown";
+  reason: string;
+  summary: string;
+  recommendedNext?: string;
+  observedAt: string;
+}
+
+export type RuntimeChildKind =
+  | "coding-agent"
+  | "browser"
+  | "subprocess"
+  | "sub-agent";
+
+export interface RuntimeChildRef {
+  kind: RuntimeChildKind;
+  id?: string;
+  name?: string;
+}
+
+export type RuntimeAnomalyKind =
+  | "browser_stuck"
+  | "unsupported_browser_path"
+  | "repeated_action_loop"
+  | "no_progress"
+  | "retry_loop"
+  | "hanging"
+  | "timeout_escalated"
+  | "objective_drift"
+  | "child_unresponsive"
+  | "child_exit_unexpected";
+
+export type RuntimeAnomalySeverity = "warning" | "critical";
+
+export interface RuntimeAnomalyEvidence {
+  repeatedInput?: string;
+  repeatedCount?: number;
+  lastProgressAt?: string;
+  stalledForMs?: number;
+  retryCount?: number;
+  childProcessName?: string;
+  exitCode?: number | null;
+  url?: string;
+  screenshotRef?: ScreenshotRef;
+  metadata?: Record<string, unknown>;
+  child?: RuntimeChildRef;
+}
+
+export interface RuntimeAnomaly {
+  id: string;
+  kind: RuntimeAnomalyKind;
+  severity: RuntimeAnomalySeverity;
+  message: string;
+  taskId: string;
+  sessionId?: string;
+  occurredAt: string;
+  relatedStep?: number;
+  relatedTool?: ActorToolName;
+  evidence?: RuntimeAnomalyEvidence;
 }
 
 export interface TaskInstruction {
