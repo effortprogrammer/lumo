@@ -10,13 +10,12 @@ It runs an actor, monitors it with a supervisor, and escalates when the task nee
 - Injects feedback on warnings and halts on critical states
 - Sends escalation alerts to operators through Discord webhooks or the terminal
 - Accepts task input from local CLI and supported chat adapters
-- Supports browser-oriented and coding-agent execution paths through the `pi` runtime
+- Supports browser-oriented and coding-agent execution paths through its built-in runtime integration
 
 ## Requirements
 
 - Node.js 22+
 - npm
-- An installed `pi` CLI available on `PATH`
 - A configured model provider for the runtime you want to use
 
 ## Install
