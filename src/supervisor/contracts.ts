@@ -1,4 +1,5 @@
 import { type BrowserProgressAssessment, type BrowserStateSnapshot, type TaskStatus, type ToolExecutionRecord } from "../domain/task.js";
+import { type CompletionState } from "../completion/types.js";
 import { type LumoStoredEvent } from "../event/types.js";
 import { type LogBatch } from "../logging/log-batcher.js";
 import { type MemoryLessonRecord, type MemorySkillRecord } from "../memory/types.js";
@@ -15,7 +16,7 @@ export interface SupervisorInputEnvelope {
   recentLifecycleEvents?: LumoStoredEvent[];
   recentSupervisorDecisionEvents?: Array<{
     status?: "ok" | "warning" | "critical";
-    action?: "continue" | "feedback" | "halt";
+    action?: "continue" | "feedback" | "halt" | "complete";
     confidence?: number;
     reason?: string;
     suggestion?: string;
@@ -40,6 +41,7 @@ export interface SupervisorInputEnvelope {
   }>;
   priorLessons?: MemoryLessonRecord[];
   priorSkills?: MemorySkillRecord[];
+  completionState?: CompletionState;
   collectionState?: {
     itemsCollected: number;
     distinctItems: number;
@@ -70,6 +72,7 @@ export function buildSupervisorInputEnvelope(
     recentActorProgressEvents?: SupervisorInputEnvelope["recentActorProgressEvents"];
     priorLessons?: SupervisorInputEnvelope["priorLessons"];
     priorSkills?: SupervisorInputEnvelope["priorSkills"];
+    completionState?: SupervisorInputEnvelope["completionState"];
   },
 ): SupervisorInputEnvelope {
   const recentLogs = batch.recentLogs ?? batch.batch;
@@ -84,6 +87,7 @@ export function buildSupervisorInputEnvelope(
     recentActorProgressEvents: options.recentActorProgressEvents,
     priorLessons: options.priorLessons,
     priorSkills: options.priorSkills,
+    completionState: options.completionState,
     collectionState: options.collectionState,
     browserState: batch.browserState,
     browserProgress: batch.browserProgress,
@@ -119,6 +123,6 @@ export function buildSupervisorOutputEnvelope(options: {
       options.report?.recommendedAction === "halted-awaiting-human"
       || recoveryPlan?.humanEscalationNeeded,
     ),
-    shouldInterveneActor: options.decision.action === "feedback" || options.decision.action === "halt",
+    shouldInterveneActor: options.decision.action === "feedback" || options.decision.action === "halt" || options.decision.action === "complete",
   };
 }

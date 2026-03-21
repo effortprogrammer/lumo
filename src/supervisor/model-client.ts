@@ -56,8 +56,32 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
       browserProgress: batch.browserProgress,
       recentLogs,
       collectionState: input.collectionState,
+      completionState: input.completionState,
     });
     const latestLog = recentLogs.at(-1);
+    if (
+      taskPhase.currentPhase === "completed"
+      && input.completionState?.contract.requiresArtifacts
+      && input.completionState.satisfied
+    ) {
+      return {
+        status: "ok",
+        confidence: Math.max(taskPhase.confidence, 0.95),
+        reason: "The completion contract is satisfied and the requested deliverables are ready.",
+        suggestion: "Finalize the task and stop further browsing or drafting.",
+        action: "complete",
+      };
+    }
+
+    if (taskPhase.currentPhase === "verifying") {
+      return {
+        status: "warning",
+        confidence: Math.max(taskPhase.confidence, 0.84),
+        reason: taskPhase.recommendation?.reason ?? taskPhase.summary,
+        suggestion: joinGuidance(taskPhase.recommendation?.instructions.join(" ") ?? "Verify the deliverables and finalize the task if complete.", memoryGuidance),
+        action: "feedback",
+      };
+    }
     if (
       taskPhase.currentPhase === "requirement_extraction" &&
       taskPhase.recommendation?.targetPhase === "synthesis" &&

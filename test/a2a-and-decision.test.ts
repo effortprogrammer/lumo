@@ -91,6 +91,18 @@ describe("SupervisorDecisionSchema", () => {
     assert.equal(decision.action, "feedback");
   });
 
+  it("accepts a valid completion decision", () => {
+    const decision = SupervisorDecisionSchema.parse({
+      status: "ok",
+      confidence: 0.97,
+      reason: "deliverables verified",
+      suggestion: "finalize the task",
+      action: "complete",
+    });
+
+    assert.equal(decision.action, "complete");
+  });
+
   it("rejects inconsistent status/action combinations", () => {
     let failed = false;
 

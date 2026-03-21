@@ -88,6 +88,63 @@ describe("assessTaskPhase", () => {
     assert.equal(phase.currentPhase, "source_selection");
     assert.equal(phase.recommendation, undefined);
   });
+
+  it("moves into verifying when artifacts exist but the completion contract is not yet satisfied", () => {
+    const phase = assessTaskPhase({
+      taskInstruction: "필요 서류를 정리하고 초안 문서를 전달해줘",
+      completionState: {
+        contract: {
+          requiresArtifacts: true,
+          minimumArtifacts: 2,
+          requiredArtifactKinds: ["draft", "summary"],
+        },
+        artifacts: [{
+          path: "/tmp/국외여행허가추천서_초안.txt",
+          kind: "draft",
+          createdAt: "2026-03-21T00:00:00Z",
+          sourceTool: "coding-agent",
+        }],
+        satisfied: false,
+        missingArtifactKinds: ["summary"],
+      },
+      recentLogs: [createCodingLog()],
+    });
+
+    assert.equal(phase.currentPhase, "verifying");
+  });
+
+  it("marks the phase completed when the completion contract is satisfied", () => {
+    const phase = assessTaskPhase({
+      taskInstruction: "필요 서류를 정리하고 초안 문서를 전달해줘",
+      completionState: {
+        contract: {
+          requiresArtifacts: true,
+          minimumArtifacts: 2,
+          requiredArtifactKinds: ["draft", "summary"],
+        },
+        artifacts: [
+          {
+            path: "/tmp/국외여행허가추천서_초안.txt",
+            kind: "draft",
+            createdAt: "2026-03-21T00:00:00Z",
+            sourceTool: "coding-agent",
+          },
+          {
+            path: "/tmp/신청가이드_전체.md",
+            kind: "summary",
+            createdAt: "2026-03-21T00:00:01Z",
+            sourceTool: "coding-agent",
+          },
+        ],
+        satisfied: true,
+        missingArtifactKinds: [],
+        lastSatisfiedAt: "2026-03-21T00:00:01Z",
+      },
+      recentLogs: [createCodingLog()],
+    });
+
+    assert.equal(phase.currentPhase, "completed");
+  });
 });
 
 function createBrowserLog(input: string, output = "") {
@@ -97,6 +154,18 @@ function createBrowserLog(input: string, output = "") {
     tool: "agent-browser" as const,
     input,
     output,
+    durationMs: 1,
+    status: "ok" as const,
+  };
+}
+
+function createCodingLog() {
+  return {
+    step: 1,
+    timestamp: "2026-03-21T00:00:00Z",
+    tool: "coding-agent" as const,
+    input: '{"path":"/tmp/file.txt","content":"ok"}',
+    output: "Successfully wrote 10 bytes to /tmp/file.txt",
     durationMs: 1,
     status: "ok" as const,
   };

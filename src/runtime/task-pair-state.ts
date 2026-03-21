@@ -1,4 +1,5 @@
 import { type TaskStatus } from "../domain/task.js";
+import { type CompletionState } from "../completion/types.js";
 import { type SupervisorDecision } from "../supervisor/decision.js";
 import { type SupervisorOutputEnvelope } from "../supervisor/contracts.js";
 import {
@@ -44,6 +45,7 @@ export interface TaskPairRuntimeState {
   taskId: string;
   actor: ActorRuntimeState;
   supervisor: SupervisorRuntimeState;
+  completion?: CompletionState;
 }
 
 export function createTaskPairRuntimeState(options: {
@@ -55,6 +57,7 @@ export function createTaskPairRuntimeState(options: {
   currentStep: number;
   supervisorStatus?: SupervisorRuntimeState["status"];
   bootstrappedAt?: string;
+  completion?: CompletionState;
 }): TaskPairRuntimeState {
   return {
     pairId: `${options.taskId}:${options.actorAgentId}:${options.supervisorAgentId}`,
@@ -71,5 +74,6 @@ export function createTaskPairRuntimeState(options: {
       status: options.supervisorStatus ?? "ready",
       bootstrappedAt: options.bootstrappedAt,
     },
+    completion: options.completion,
   };
 }

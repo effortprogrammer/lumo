@@ -1,5 +1,5 @@
 export type SupervisorStatus = "ok" | "warning" | "critical";
-export type SupervisorAction = "continue" | "feedback" | "halt";
+export type SupervisorAction = "continue" | "feedback" | "halt" | "complete";
 
 export interface SupervisorDecision {
   status: SupervisorStatus;
@@ -35,14 +35,14 @@ export const SupervisorDecisionSchema = {
       throw new Error("Supervisor decision suggestion must be a non-empty string");
     }
 
-    if (action !== "continue" && action !== "feedback" && action !== "halt") {
+    if (action !== "continue" && action !== "feedback" && action !== "halt" && action !== "complete") {
       throw new Error(
-        "Supervisor decision action must be continue, feedback, or halt",
+        "Supervisor decision action must be continue, feedback, halt, or complete",
       );
     }
 
-    if (status === "ok" && action !== "continue") {
-      throw new Error('Status "ok" must use action "continue"');
+    if (status === "ok" && action !== "continue" && action !== "complete") {
+      throw new Error('Status "ok" must use action "continue" or "complete"');
     }
 
     if (status === "critical" && action === "continue") {

@@ -5,6 +5,7 @@ import {
   type TaskContext,
   type ToolExecutionRecord,
 } from "../domain/task.js";
+import { type CompletionState } from "../completion/types.js";
 
 export interface LogBatcherOptions {
   maxSteps: number;
@@ -21,6 +22,7 @@ export interface LogBatch {
   anomalies: RuntimeAnomaly[];
   browserState?: BrowserStateSnapshot;
   browserProgress?: BrowserProgressAssessment;
+  completionState?: CompletionState;
   triggeredBy: "steps" | "time" | "risk" | "manual" | "anomaly";
 }
 

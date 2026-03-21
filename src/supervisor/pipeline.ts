@@ -90,6 +90,7 @@ export class SupervisorPipeline {
       occurredAt: this.now(),
       currentStatus: latestLog?.status === "error" ? "failed" : "running",
       currentStep: latestLog?.step,
+      completionState: batch.completionState,
     });
   }
 

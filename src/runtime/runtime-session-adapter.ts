@@ -20,6 +20,7 @@ import { LogBatcher, type LogBatch } from "../logging/log-batcher.js";
 import { type SupervisorDecision } from "../supervisor/decision.js";
 import { assessBottleneck, type BottleneckAssessment } from "../supervisor/bottleneck.js";
 import { type SupervisorOutputEnvelope } from "../supervisor/contracts.js";
+import { assessTaskPhase } from "../supervisor/phase.js";
 import {
   HeuristicRuntimeAnomalyDetector,
   type RuntimeAnomalyDetector,
@@ -34,6 +35,13 @@ import { SupervisorPipeline } from "../supervisor/pipeline.js";
 import { createDefaultPiMonoRuntimeClient } from "./pi-rpc-runtime-client.js";
 import { type CommandRunner, SubprocessCommandRunner } from "./subprocess.js";
 import { createTaskPairRuntimeState, type TaskPairRuntimeState } from "./task-pair-state.js";
+import {
+  applyArtifactClaim,
+  createCompletionState,
+  extractArtifactClaim,
+  inferCompletionContract,
+  summarizeCompletionState,
+} from "../completion/contract.js";
 
 export type RuntimeProvider = "pi";
 
@@ -260,6 +268,7 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
     }
 
     const sessionId = `pi-${Date.now()}`;
+    const completion = createCompletionState(inferCompletionContract(options.instruction));
     const session: RuntimeSession = {
       sessionId,
       provider: "pi",
@@ -271,6 +280,7 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
         supervisorAgentId: "pending-supervisor",
         status: "pending",
         currentStep: 0,
+        completion,
       }),
       actorLogs: [],
     };
@@ -281,6 +291,7 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
       supervisorAgentId: session.task.task.supervisor.id,
       status: session.task.task.status,
       currentStep: session.task.task.currentStep,
+      completion,
     });
 
   // TODO: Replace the mock client contract with the real pi SDK/session broker.
@@ -321,6 +332,30 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
       onOutput: (output) => {
         record.session.pairState.supervisor.lastOutput = output;
         record.session.pairState.supervisor.lastEvaluatedAt = this.now();
+        if (output.decision.action === "complete") {
+          const occurredAt = this.now();
+          this.emit(record.listeners, {
+            type: "conversation",
+            sessionId: record.session.sessionId,
+            turn: {
+              id: `turn-${Date.now()}`,
+              role: "supervisor",
+              text: output.decision.suggestion ?? output.decision.reason,
+              timestamp: occurredAt,
+            },
+          });
+          this.emitMappedPiEvent(record, {
+            type: "session.status",
+            taskId: created.externalSessionId,
+            status: "completed",
+            occurredAt,
+          });
+          this.stopSupervision(record);
+          void this.client.halt(created.externalSessionId, "Task completed by supervisor", {
+            role: "supervisor",
+          }).catch(() => {});
+          return;
+        }
         this.emit(record.listeners, {
           type: "supervisor-output",
           sessionId: record.session.sessionId,
@@ -480,6 +515,23 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
   ): void {
     record.progressSequence += 1;
     const collectionState = inferCollectionState(record.session.actorLogs);
+    const recentLogs = record.session.actorLogs.slice(-20);
+    const browserContext = enrichBrowserSituation({
+      taskInstruction: record.session.task.context.instruction.text,
+      conversationHistory: record.session.task.context.conversationHistory.map((turn) => turn.text),
+      batch: recentLogs,
+      recentLogs,
+      anomalies: options.anomalies ?? [],
+      triggeredBy: "manual",
+    }, this.now());
+    const taskPhase = assessTaskPhase({
+      taskInstruction: record.session.task.context.instruction.text,
+      browserState: browserContext.browserState,
+      browserProgress: browserContext.browserProgress,
+      recentLogs,
+      collectionState: collectionState ?? undefined,
+      completionState: record.session.pairState.completion,
+    });
     const progress = buildActorProgressMessage({
       progressId: `progress-${record.session.sessionId}-${record.progressSequence}`,
       actorSessionId: record.session.sessionId,
@@ -488,8 +540,13 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
       collectionState: collectionState ?? undefined,
       currentStatus: record.session.task.task.status,
       currentStep: record.session.task.task.currentStep,
-      summary: options.summary,
+      summary: options.summary ?? summarizeCompletionState(record.session.pairState.completion ?? createCompletionState(inferCompletionContract(record.session.task.context.instruction.text))),
       anomalies: options.anomalies,
+      browserState: browserContext.browserState,
+      browserProgress: browserContext.browserProgress,
+      taskPhase,
+      artifacts: record.session.pairState.completion?.artifacts,
+      completionState: record.session.pairState.completion,
     });
     record.session.pairState.supervisor.lastProgress = progress;
     if (record.supervisorTransport) {
@@ -530,6 +587,7 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
     try {
       const enrichedBatch = enrichBrowserSituation({
         ...batch,
+        completionState: record.session.pairState.completion,
         recentLogs: record.session.actorLogs.slice(-20),
       }, this.now());
       const bottleneck = assessBottleneck({
@@ -941,26 +999,34 @@ export function mapPiMonoEventToLumoSessionEvents(
     session.task.task.lastUpdatedAt = event.occurredAt;
     session.pairState.actor.currentStep = session.task.task.currentStep;
     session.pairState.actor.lastOutputAt = event.occurredAt;
+    const record: ToolExecutionRecord = {
+      step: session.task.task.currentStep,
+      timestamp: event.occurredAt,
+      tool: event.tool,
+      input: event.input,
+      output: event.output,
+      durationMs: event.durationMs,
+      exitCode: event.exitCode,
+      status: (event.exitCode ?? 0) === 0 ? "ok" : "error",
+      metadata: {
+        runtimeProvider: "pi",
+        sourceTaskId: event.taskId,
+        runtimeSessionId: session.sessionId,
+        ...event.metadata,
+      },
+      screenshotRef: event.screenshotRef,
+    };
+    const artifactClaim = extractArtifactClaim(record);
+    if (artifactClaim) {
+      session.pairState.completion = applyArtifactClaim(
+        session.pairState.completion ?? createCompletionState(inferCompletionContract(session.task.context.instruction.text)),
+        artifactClaim,
+      );
+    }
     return [{
       type: "log",
       sessionId: session.sessionId,
-      record: {
-        step: session.task.task.currentStep,
-        timestamp: event.occurredAt,
-        tool: event.tool,
-        input: event.input,
-        output: event.output,
-        durationMs: event.durationMs,
-        exitCode: event.exitCode,
-        status: (event.exitCode ?? 0) === 0 ? "ok" : "error",
-        metadata: {
-    runtimeProvider: "pi",
-          sourceTaskId: event.taskId,
-          runtimeSessionId: session.sessionId,
-          ...event.metadata,
-        },
-        screenshotRef: event.screenshotRef,
-      },
+      record,
     }];
   }
 

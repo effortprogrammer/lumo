@@ -337,6 +337,7 @@ describe("initializePiMonoRuntimeSessionAdapter", () => {
     });
 
     await waitForAsyncWork();
+    await waitForAsyncWork();
 
     assert.ok(events.some((event) =>
       event.type === "decision"
@@ -389,6 +390,7 @@ describe("initializePiMonoRuntimeSessionAdapter", () => {
       exitCode: 0,
     });
 
+    await waitForAsyncWork();
     await waitForAsyncWork();
 
     assert.ok(events.some((event) => event.type === "supervisor-progress"));
@@ -451,6 +453,7 @@ describe("initializePiMonoRuntimeSessionAdapter", () => {
       },
     });
 
+    await waitForAsyncWork();
     await waitForAsyncWork();
 
     assert.equal(client.haltCalls.length, 1);
@@ -676,6 +679,64 @@ describe("SessionManager", () => {
     assert.equal(session.pairState.supervisor.agentId, session.runtime.task.task.supervisor.id);
     assert.equal(manager.current?.pairState.actor.sessionId, session.runtime.sessionId);
     assert.deepEqual(session.supervisorOutputs, []);
+  });
+
+  it("marks artifact-producing tasks completed when the completion contract is satisfied", async () => {
+    const config = createDefaultConfig();
+    config.supervisor.client = "heuristic";
+    config.batch.maxSteps = 1;
+    const client = new SupervisablePiMonoClient();
+    const manager = await SessionManager.create(config, undefined, undefined, {
+      healthCheck: () => true,
+      piMonoClient: client,
+    });
+
+    const statuses: string[] = [];
+    const session = manager.createTask(
+      "산업기능요원 해외출국에 필요한 서류를 정리하고 초안 문서를 전달해줘",
+      {
+        onStatusChange: (status) => statuses.push(status),
+      },
+    );
+    const externalSessionId = `external-${session.runtime.sessionId}`;
+
+    client.emit(externalSessionId, {
+      type: "session.started",
+      taskId: session.runtime.task.task.taskId,
+      startedAt: "2026-03-21T12:00:00Z",
+    });
+    client.emit(externalSessionId, {
+      type: "task.output",
+      taskId: session.runtime.task.task.taskId,
+      occurredAt: "2026-03-21T12:00:01Z",
+      tool: "coding-agent",
+      input: '{"path":"/tmp/국외여행허가추천서_초안.txt","content":"draft"}',
+      output: "Successfully wrote 100 bytes to /tmp/국외여행허가추천서_초안.txt",
+      durationMs: 1,
+      exitCode: 0,
+    });
+    client.emit(externalSessionId, {
+      type: "task.output",
+      taskId: session.runtime.task.task.taskId,
+      occurredAt: "2026-03-21T12:00:02Z",
+      tool: "coding-agent",
+      input: '{"path":"/tmp/신청가이드_전체.md","content":"summary"}',
+      output: "Successfully wrote 120 bytes to /tmp/신청가이드_전체.md",
+      durationMs: 1,
+      exitCode: 0,
+    });
+
+    await waitForAsyncWork();
+    await waitForAsyncWork();
+    await waitForAsyncWork();
+    await waitForAsyncWork();
+
+    assert.equal(session.runtime.task.task.status, "completed");
+    assert.equal(session.pairState.completion?.satisfied, true);
+    assert.ok(session.pairState.completion?.artifacts.some((artifact) => artifact.kind === "draft"));
+    assert.ok(session.pairState.completion?.artifacts.some((artifact) => artifact.kind === "summary"));
+    assert.ok(statuses.includes("completed"));
+    assert.ok(client.haltCalls.some((call) => call.reason === "Task completed by supervisor"));
   });
 });
 

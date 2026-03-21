@@ -3,6 +3,7 @@ import {
   type BrowserStateSnapshot,
   type ToolExecutionRecord,
 } from "../domain/task.js";
+import { type CompletionState } from "../completion/types.js";
 
 export type TaskPhase =
   | "searching"
@@ -10,6 +11,8 @@ export type TaskPhase =
   | "requirement_extraction"
   | "synthesis"
   | "artifact_drafting"
+  | "verifying"
+  | "completed"
   | "blocked";
 
 export interface PhaseTransitionRecommendation {
@@ -38,6 +41,7 @@ export interface TaskPhaseAssessmentContext {
     comparisonReady?: boolean;
     recommendationReady?: boolean;
   };
+  completionState?: CompletionState;
 }
 
 export function assessTaskPhase(
@@ -53,6 +57,18 @@ export function assessTaskPhase(
   const hasEnoughResearchSignals = browserLogs.length >= 4;
   const distinctCollectionItems = countDistinctCollectionItems(context.recentLogs);
 
+  if (context.completionState?.contract.requiresArtifacts && context.completionState.satisfied) {
+    return {
+      currentPhase: "completed",
+      confidence: 0.96,
+      summary: "The requested deliverables were produced and the completion contract is satisfied.",
+      evidence: [
+        `Artifacts produced: ${context.completionState.artifacts.length}.`,
+        ...context.completionState.artifacts.map((artifact) => `Artifact: ${artifact.path}`),
+      ].slice(0, 4),
+    };
+  }
+
   if (latestLog?.status === "error" || context.browserProgress?.state === "stalled") {
     return {
       currentPhase: "blocked",
@@ -66,6 +82,23 @@ export function assessTaskPhase(
   }
 
   if (codingLogs.length > 0 && wantsArtifact) {
+    if (context.completionState?.contract.requiresArtifacts && (context.completionState.artifacts.length ?? 0) > 0) {
+      return {
+        currentPhase: "verifying",
+        confidence: 0.84,
+        summary: "The actor has already produced artifacts and should verify deliverable completeness instead of continuing broad research.",
+        evidence: context.completionState?.artifacts.map((artifact) => `Artifact: ${artifact.path}`) ?? [],
+        recommendation: {
+          targetPhase: "synthesis",
+          reason: "The task has deliverables on disk and should now verify completion criteria before stopping.",
+          instructions: [
+            "Stop broad browsing and verify the requested deliverables against the original task.",
+            `Confirm whether the completion contract is satisfied. Missing kinds: ${context.completionState?.missingArtifactKinds.join(", ") || "none"}.`,
+            "If the contract is satisfied, finalize the task instead of continuing research.",
+          ],
+        },
+      };
+    }
     return {
       currentPhase: "artifact_drafting",
       confidence: 0.86,

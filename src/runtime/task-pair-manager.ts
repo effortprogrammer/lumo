@@ -435,6 +435,7 @@ export class TaskPairManager {
       currentStatus: pair.pairState.actor.status,
       currentStep: pair.pairState.actor.currentStep,
       collectionState: pair.pairState.supervisor.lastProgress?.collectionState,
+      completionState: pair.pairState.supervisor.lastProgress?.completionState ?? pair.pairState.completion,
       recentLifecycleEvents: recentEventContext.lifecycleEvents,
       recentSupervisorDecisionEvents: recentEventContext.supervisorDecisionEvents,
       recentAnomalyEvents: recentEventContext.anomalyEvents,
@@ -451,6 +452,9 @@ export class TaskPairManager {
     pair.supervisorOutputs.push(output);
     pair.pairState.supervisor.lastOutput = output;
     pair.pairState.supervisor.lastEvaluatedAt = this.now();
+    if (output.decision.action === "complete") {
+      this.finalizePair(pair, output.decision.reason);
+    }
     if (latestProgress) {
       pair.pairState.supervisor.lastProgress = latestProgress;
     }
@@ -573,6 +577,7 @@ export class TaskPairManager {
       currentStep: pair.pairState.actor.currentStep,
       taskPhase,
       collectionState: drained.at(-1)?.collectionState,
+      completionState: drained.at(-1)?.completionState ?? pair.pairState.completion,
       recentLifecycleEvents: recentEventContext.lifecycleEvents,
       recentSupervisorDecisionEvents: recentEventContext.supervisorDecisionEvents,
       recentAnomalyEvents: recentEventContext.anomalyEvents,
@@ -679,6 +684,21 @@ export class TaskPairManager {
       session: pair.session,
       finalStatus: status,
     });
+  }
+
+  private finalizePair(pair: ManagedTaskPair, reason: string): void {
+    pair.session.runtime.task.task.status = "completed";
+    pair.session.runtime.task.task.completedAt = this.now();
+    pair.session.runtime.task.task.lastUpdatedAt = this.now();
+    pair.pairState.actor.status = "completed";
+    pair.pairState.supervisor.lastInterventionEffect = {
+      interventionId: `complete-${Date.now()}`,
+      status: "resolved",
+      evaluatedAt: this.now(),
+      reason,
+    };
+    this.stopSupervisorLoop();
+    void this.reviewCompletedPair(pair, "completed");
   }
 
   private attachSeparateSupervisorInterventionListener(pair: ManagedTaskPair): void {
@@ -882,6 +902,12 @@ function evaluateSpecializedInterventionEffect(
     return progress.currentStatus === "halted" ? "resolved" : "unresolved";
   }
 
+  if (decision?.action === "complete") {
+    return progress.completionState?.satisfied || progress.currentStatus === "completed"
+      ? "resolved"
+      : "unresolved";
+  }
+
   if (summary.includes("synthes") || progress.taskPhase?.currentPhase === "synthesis") {
     return "resolved";
   }
@@ -949,8 +975,8 @@ function isSupervisorDecisionStatus(value: unknown): value is "ok" | "warning" |
   return value === "ok" || value === "warning" || value === "critical";
 }
 
-function isSupervisorDecisionAction(value: unknown): value is "continue" | "feedback" | "halt" {
-  return value === "continue" || value === "feedback" || value === "halt";
+function isSupervisorDecisionAction(value: unknown): value is "continue" | "feedback" | "halt" | "complete" {
+  return value === "continue" || value === "feedback" || value === "halt" || value === "complete";
 }
 
 function toManagedTaskPair(

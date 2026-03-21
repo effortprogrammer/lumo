@@ -5,6 +5,7 @@ import {
   type RuntimeAnomaly,
   type TaskStatus,
 } from "../domain/task.js";
+import { type ArtifactClaim, type CompletionState } from "../completion/types.js";
 import { type BottleneckKind } from "../supervisor/bottleneck.js";
 import { type SupervisorDecision } from "../supervisor/decision.js";
 import { type TaskPhase, type TaskPhaseAssessment } from "../supervisor/phase.js";
@@ -52,6 +53,8 @@ export interface ActorProgressMessage {
   browserState?: BrowserStateSnapshot;
   browserProgress?: BrowserProgressAssessment;
   taskPhase?: TaskPhaseAssessment;
+  artifacts?: ArtifactClaim[];
+  completionState?: CompletionState;
 }
 
 export interface ActorInterventionAckMessage {
@@ -182,6 +185,8 @@ export function buildActorProgressMessage(options: {
   browserState?: BrowserStateSnapshot;
   browserProgress?: BrowserProgressAssessment;
   taskPhase?: TaskPhaseAssessment;
+  artifacts?: ActorProgressMessage["artifacts"];
+  completionState?: ActorProgressMessage["completionState"];
 }): ActorProgressMessage {
   return {
     type: "actor-progress",
@@ -197,6 +202,8 @@ export function buildActorProgressMessage(options: {
     browserState: options.browserState,
     browserProgress: options.browserProgress,
     taskPhase: options.taskPhase,
+    artifacts: options.artifacts,
+    completionState: options.completionState,
   };
 }
 

@@ -35,7 +35,7 @@ export interface SupervisorEscalationReport {
     confidence: number;
     reason: string;
     suggestion?: string;
-    action: "continue" | "feedback" | "halt";
+    action: "continue" | "feedback" | "halt" | "complete";
   };
   evidence: {
     latestStep?: number;
@@ -93,7 +93,11 @@ export function buildSupervisorEscalationReport(
     taskId: options.taskId,
     sessionId,
     severity: decision.status === "critical" ? "critical" : "warning",
-    status: decision.action === "halt" ? "halted" : "running",
+    status: decision.action === "halt"
+      ? "halted"
+      : decision.action === "complete"
+        ? "paused"
+        : "running",
     title,
     summary,
     currentActivity,
@@ -192,6 +196,9 @@ function mapRecommendedAction(
   }
   if (decision.action === "feedback") {
     return "resume-with-guidance";
+  }
+  if (decision.action === "complete") {
+    return "terminate";
   }
   return "observe";
 }
