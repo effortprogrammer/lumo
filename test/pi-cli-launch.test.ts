@@ -33,6 +33,22 @@ describe("createPiCliLaunchSpec", () => {
     );
   });
 
+  it("falls back to the installed pi package CLI when .bin resolution is unavailable", () => {
+    const config = createDefaultConfig();
+
+    const spec = createPiCliLaunchSpec(
+      config,
+      { PATH: "" },
+      "/tmp/no-direct-bin",
+      () => undefined,
+      false,
+      () => "/opt/lumo/node_modules/@mariozechner/pi-coding-agent/dist/index.js",
+      () => true,
+    );
+
+    assert.equal(spec.command, "/opt/lumo/node_modules/@mariozechner/pi-coding-agent/dist/cli.js");
+  });
+
   it("prepares a fallback writable home and accepts env-based provider config", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "lumo-pi-home-"));
 

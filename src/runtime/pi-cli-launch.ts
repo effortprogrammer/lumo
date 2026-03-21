@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { access, mkdir, readFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
-import { join, resolve } from "node:path";
+import { constants as fsConstants, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import {
   resolveBinaryCommand,
   resolveBinaryCommandFromModule,
@@ -33,6 +34,8 @@ export function createPiCliLaunchSpec(
   cwd = process.cwd(),
   resolveBinary: BinaryResolver = resolveBinaryCommand,
   allowModuleFallback = true,
+  resolvePackageEntry: (packageName: string) => string | undefined = defaultResolvePackageEntry,
+  pathExists: (path: string) => boolean = existsSync,
 ): PiCliLaunchSpec {
   const resolved = resolveBinary(DEFAULT_CLI_CANDIDATES, {
     cwd,
@@ -42,19 +45,42 @@ export function createPiCliLaunchSpec(
       env,
     })
     : undefined);
+  const packageCliPath = resolved?.path
+    ? undefined
+    : resolvePiCliFromInstalledPackage(resolvePackageEntry("@mariozechner/pi-coding-agent"), pathExists);
 
-  if (!resolved?.path) {
+  if (!resolved?.path && !packageCliPath) {
     throw new Error("pi CLI is unavailable");
   }
 
   return {
-    command: resolved.path,
+    command: resolved?.path ?? packageCliPath!,
     args: [],
     env: {
       ...env,
       LUMO_LAUNCH_MODE: "pi-cli",
     },
   };
+}
+
+function defaultResolvePackageEntry(packageName: string): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    return require.resolve(packageName);
+  } catch {
+    return undefined;
+  }
+}
+
+function resolvePiCliFromInstalledPackage(
+  packageEntry: string | undefined,
+  pathExists: (path: string) => boolean,
+): string | undefined {
+  if (!packageEntry) {
+    return undefined;
+  }
+  const candidate = join(dirname(packageEntry), "cli.js");
+  return pathExists(candidate) ? candidate : undefined;
 }
 
 export async function launchPiCli(
