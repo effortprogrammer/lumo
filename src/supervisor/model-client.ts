@@ -50,6 +50,8 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
     };
     const recentLogs = batch.recentLogs ?? batch.batch;
     const memoryGuidance = buildMemoryGuidance(input);
+    const browserLogs = recentLogs.filter((record) => record.tool === "agent-browser");
+    const codingLogs = recentLogs.filter((record) => record.tool === "coding-agent");
     const taskPhase = input.taskPhase ?? assessTaskPhase({
       taskInstruction: batch.taskInstruction,
       browserState: batch.browserState,
@@ -59,6 +61,37 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
       completionState: input.completionState,
     });
     const latestLog = recentLogs.at(-1);
+    if (batch.browserState?.pageKind === "search_results" && batch.browserState.domainTrust === "low") {
+      return {
+        status: "warning",
+        confidence: 0.86,
+        reason: "The actor is still browsing low-trust search results instead of a trustworthy source.",
+        suggestion: joinGuidance(
+          "Stop bouncing across search engines and navigate directly to the most authoritative likely source for this task.",
+          memoryGuidance,
+        ),
+        action: "feedback",
+      };
+    }
+
+    if (
+      batch.browserState?.domainTrust === "high"
+      && browserLogs.length >= 4
+      && codingLogs.length === 0
+      && /정리|요약|설명|draft|초안|전달|문서|recommend|추천|찾아/.test(batch.taskInstruction.toLowerCase())
+    ) {
+      return {
+        status: "warning",
+        confidence: 0.89,
+        reason: "The actor has reached a trustworthy source and should switch from browsing into extraction or drafting.",
+        suggestion: joinGuidance(
+          "Stop broad browsing, extract the needed facts from the current trustworthy source, and move into synthesis or drafting now.",
+          memoryGuidance,
+        ),
+        action: "feedback",
+      };
+    }
+
     if (taskPhase.currentPhase === "completed" && input.completionState?.satisfied) {
       return {
         status: "ok",

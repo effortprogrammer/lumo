@@ -151,6 +151,36 @@ describe("assessTaskPhase", () => {
 
     assert.equal(phase.currentPhase, "completed");
   });
+
+  it("moves high-trust government pages into requirement_extraction for summary tasks", () => {
+    const phase = assessTaskPhase({
+      taskInstruction: "산업기능요원의 해외여행 허가 서류를 찾아서 정리해줘",
+      browserState: {
+        pageKind: "article",
+        title: "전문연구.산업기능요원 국외출장 등 - 병무청",
+        url: "https://www.mma.go.kr/contents.do?mc=mma0000789",
+        domainTrust: "high",
+      },
+      browserProgress: {
+        state: "advancing",
+        goalRelevance: "high",
+        sourceTrust: "high",
+        reason: "The browser state changed and produced new page context.",
+        summary: "The browser is currently on a trustworthy government source.",
+        recommendedNext: "Continue extracting the needed information from the current trustworthy source.",
+        observedAt: "2026-03-21T00:00:00Z",
+      },
+      recentLogs: [
+        createBrowserLog("open https://www.mma.go.kr/contents.do?mc=usr0000186"),
+        createBrowserLog("snapshot"),
+        createBrowserLog("open https://www.mma.go.kr/contents.do?mc=mma0000789"),
+        createBrowserLog("snapshot"),
+      ],
+    });
+
+    assert.equal(phase.currentPhase, "requirement_extraction");
+    assert.equal(phase.recommendation?.targetPhase, "synthesis");
+  });
 });
 
 function createBrowserLog(input: string, output = "") {

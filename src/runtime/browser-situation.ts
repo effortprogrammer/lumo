@@ -40,6 +40,7 @@ export function buildBrowserStateSnapshot(
     url,
     title,
     pageKind: classifyBrowserPage(url, title),
+    domainTrust: classifyDomainTrust(url),
     lastAction: latest?.input,
     lastActionAt: latest?.timestamp,
     lastMeaningfulChangeAt,
@@ -63,6 +64,7 @@ export function buildBrowserProgressAssessment(
     return {
       state: "unclear",
       goalRelevance: relevance,
+      sourceTrust: stateSnapshot.domainTrust,
       reason: "No browser activity has been recorded yet.",
       summary: "No browser progress has been observed yet.",
       observedAt: now,
@@ -74,9 +76,22 @@ export function buildBrowserProgressAssessment(
     return {
       state: "stalled",
       goalRelevance: relevance,
+      sourceTrust: stateSnapshot.domainTrust,
       reason: failureGuidance.reason,
       summary: failureGuidance.summary,
       recommendedNext: failureGuidance.recommendedNext,
+      observedAt: now,
+    };
+  }
+
+  if (stateSnapshot.pageKind === "search_results" && stateSnapshot.domainTrust === "low") {
+    return {
+      state: "stalled",
+      goalRelevance: relevance,
+      sourceTrust: stateSnapshot.domainTrust,
+      reason: "The actor is still on a weak search-results page instead of a trustworthy source.",
+      summary: buildProgressSummary(stateSnapshot),
+      recommendedNext: "Prefer an official or directly relevant source instead of continuing to bounce across search engines.",
       observedAt: now,
     };
   }
@@ -87,6 +102,7 @@ export function buildBrowserProgressAssessment(
     return {
       state: "stalled",
       goalRelevance: relevance,
+      sourceTrust: stateSnapshot.domainTrust,
       reason: "The browser action repeated without a meaningful page-state change.",
       summary: "The browser appears to be repeating the same step without advancing.",
       recommendedNext: "Change strategy or inspect the current page state before retrying.",
@@ -98,9 +114,10 @@ export function buildBrowserProgressAssessment(
     return {
       state: "advancing",
       goalRelevance: relevance,
+      sourceTrust: stateSnapshot.domainTrust,
       reason: "The browser state changed and produced new page context.",
       summary: buildProgressSummary(stateSnapshot),
-      recommendedNext: "Continue extracting the needed information from the current page.",
+      recommendedNext: buildRecommendedNext(stateSnapshot),
       observedAt: now,
     };
   }
@@ -108,6 +125,7 @@ export function buildBrowserProgressAssessment(
   return {
     state: "unclear",
     goalRelevance: relevance,
+    sourceTrust: stateSnapshot.domainTrust,
     reason: "The browser action completed, but no stable page context was extracted yet.",
     summary: "Browser progress is ambiguous because URL/title evidence is missing.",
     recommendedNext: "Capture a snapshot or query the current title/URL before proceeding.",
@@ -125,7 +143,17 @@ function buildBrowserProgressSignature(record: ToolExecutionRecord): string {
 
 function buildProgressSummary(snapshot: BrowserStateSnapshot): string {
   const pageTarget = snapshot.title ?? snapshot.url ?? "the current page";
-  return `The browser is currently on ${pageTarget} (${snapshot.pageKind}).`;
+  return `The browser is currently on ${pageTarget} (${snapshot.pageKind}, trust=${snapshot.domainTrust ?? "unknown"}).`;
+}
+
+function buildRecommendedNext(snapshot: BrowserStateSnapshot): string {
+  if (snapshot.domainTrust === "high") {
+    return "Continue extracting the needed information from the current trustworthy source.";
+  }
+  if (snapshot.pageKind === "search_results") {
+    return "Stop broad searching and navigate to an official or directly authoritative source.";
+  }
+  return "Continue extracting the needed information from the current page.";
 }
 
 function buildTextHints(record: ToolExecutionRecord | undefined): string[] | undefined {
@@ -153,6 +181,9 @@ function classifyBrowserPage(
   if (combined.includes("google.com/search") || /\bsearch\b/.test(combined)) {
     return "search_results";
   }
+  if (/(go\.kr|gov|gov\.kr)\b/.test(combined) || combined.includes("병무청")) {
+    return "article";
+  }
   if (/linkedin\.com\/jobs\/view|\/jobs\/view\//.test(combined) || /\bjob detail\b/.test(combined)) {
     return "job_detail";
   }
@@ -171,11 +202,34 @@ function classifyBrowserPage(
   return "unknown";
 }
 
+function classifyDomainTrust(url: string | undefined): "high" | "medium" | "low" | undefined {
+  if (!url) {
+    return undefined;
+  }
+  const normalized = url.toLowerCase();
+  if (/(^https?:\/\/)?([a-z0-9-]+\.)*(go\.kr|gov|gov\.kr|ac\.kr|or\.kr)\b/.test(normalized)) {
+    return "high";
+  }
+  if (/(^https?:\/\/)?([a-z0-9-]+\.)*(google|bing|naver|duckduckgo)\./.test(normalized)) {
+    return "low";
+  }
+  if (/(namu\.wiki|blog\.|tistory\.com|velog\.io|medium\.com)/.test(normalized)) {
+    return "low";
+  }
+  return "medium";
+}
+
 function assessGoalRelevance(
   taskInstruction: string,
   snapshot: BrowserStateSnapshot,
 ): BrowserProgressAssessment["goalRelevance"] {
   const haystack = `${taskInstruction} ${snapshot.url ?? ""} ${snapshot.title ?? ""}`.toLowerCase();
+  if (snapshot.domainTrust === "high") {
+    return "high";
+  }
+  if (snapshot.domainTrust === "low" && snapshot.pageKind === "search_results") {
+    return "low";
+  }
   if (haystack.includes("openai") && (snapshot.url?.toLowerCase().includes("openai") || snapshot.title?.toLowerCase().includes("openai"))) {
     return "high";
   }

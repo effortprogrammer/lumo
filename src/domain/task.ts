@@ -52,6 +52,7 @@ export interface BrowserStateSnapshot {
   url?: string;
   title?: string;
   pageKind: BrowserPageKind;
+  domainTrust?: "high" | "medium" | "low";
   lastAction?: string;
   lastActionAt?: string;
   lastMeaningfulChangeAt?: string;
@@ -63,6 +64,7 @@ export interface BrowserStateSnapshot {
 export interface BrowserProgressAssessment {
   state: "advancing" | "stalled" | "unclear";
   goalRelevance: "high" | "medium" | "low" | "unknown";
+  sourceTrust?: "high" | "medium" | "low";
   reason: string;
   summary: string;
   recommendedNext?: string;

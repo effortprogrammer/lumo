@@ -124,6 +124,36 @@ describe("assessBottleneck", () => {
 
     assert.notEqual(bottleneck?.kind, "research_without_synthesis");
   });
+
+  it("classifies repeated weak-search visits as weak_source_churn", () => {
+    const bottleneck = assessBottleneck({
+      anomalies: [],
+      browserProgress: {
+        state: "stalled",
+        goalRelevance: "low",
+        sourceTrust: "low",
+        reason: "The actor is still on a weak search-results page instead of a trustworthy source.",
+        summary: "The browser is currently on Google Search (search_results, trust=low).",
+        recommendedNext: "Prefer an official or directly relevant source instead of continuing to bounce across search engines.",
+        observedAt: "2026-03-15T11:05:00Z",
+      },
+      browserState: {
+        pageKind: "search_results",
+        title: "산업기능요원 해외여행 허가 서류 - Google Search",
+        url: "https://www.google.com/search?q=산업기능요원+해외여행+허가+서류",
+        domainTrust: "low",
+      },
+      recentLogs: [
+        createSearchLog("https://www.google.com/search?q=산업기능요원+해외여행+허가+서류"),
+        createSearchLog("https://www.bing.com/search?q=산업기능요원+해외여행+허가+서류"),
+        createSearchLog("https://search.naver.com/search.naver?query=산업기능요원+해외여행+허가+서류"),
+      ],
+      taskInstruction: "산업기능요원의 해외여행 허가 서류를 찾아서 정리해줘",
+    });
+
+    assert.equal(bottleneck?.kind, "weak_source_churn");
+    assert.equal(bottleneck?.recoveryPlan.action, "prefer_official_source");
+  });
 });
 
 function createBrowserLog(input: string, output = "") {
@@ -135,5 +165,18 @@ function createBrowserLog(input: string, output = "") {
     output,
     durationMs: 1,
     status: "ok" as const,
+  };
+}
+
+function createSearchLog(url: string) {
+  return {
+    step: 1,
+    timestamp: "2026-03-15T11:00:00Z",
+    tool: "agent-browser" as const,
+    input: `open ${url}`,
+    output: "ok",
+    durationMs: 1,
+    status: "ok" as const,
+    metadata: { url },
   };
 }

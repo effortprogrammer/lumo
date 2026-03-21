@@ -50,6 +50,7 @@ export function assessTaskPhase(
   const latestLog = context.recentLogs.at(-1);
   const normalizedTask = context.taskInstruction.toLowerCase();
   const wantsArtifact = /resume|cv|이력서|draft|초안|정리|deliver|전달/.test(normalizedTask);
+  const wantsSynthesis = wantsArtifact || /정리|요약|설명|찾아|guide|summary|recommend|추천/.test(normalizedTask);
   const wantsCollection = isCollectionTask(normalizedTask);
   const browserLogs = context.recentLogs.filter((record) => record.tool === "agent-browser");
   const codingLogs = context.recentLogs.filter((record) => record.tool === "coding-agent");
@@ -126,7 +127,7 @@ export function assessTaskPhase(
     };
   }
 
-  if (isRelevantResearchPage(context.browserState) && wantsArtifact && (isObservationHeavy(browserLogs) || hasEnoughResearchSignals)) {
+  if (isRelevantResearchPage(context.browserState) && wantsSynthesis && (isObservationHeavy(browserLogs) || hasEnoughResearchSignals)) {
     return {
       currentPhase: "requirement_extraction",
       confidence: hasEnoughResearchSignals ? 0.87 : 0.82,
@@ -144,8 +145,10 @@ export function assessTaskPhase(
         reason: "The task already reached a relevant source page and should now extract role requirements before drafting.",
         instructions: [
           "Stop broad navigation and use the current page as the primary source.",
-          "Extract the required skills, responsibilities, and qualifications from the current page.",
-          "Switch to synthesis and prepare the requested resume draft.",
+          "Extract the relevant facts from the current page.",
+          wantsArtifact
+            ? "Switch to synthesis and prepare the requested deliverable draft."
+            : "Switch to synthesis and produce the requested summary or recommendation.",
         ],
       },
     };
@@ -200,8 +203,12 @@ function isRelevantResearchPage(browserState: BrowserStateSnapshot | undefined):
   if (!browserState) {
     return false;
   }
+  if (browserState.domainTrust === "high") {
+    return true;
+  }
   return browserState.pageKind === "job_listing"
     || browserState.pageKind === "job_detail"
+    || browserState.pageKind === "article"
     || browserState.pageKind === "search_results";
 }
 

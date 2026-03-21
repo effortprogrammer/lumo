@@ -23,6 +23,41 @@ describe("enrichBrowserSituation", () => {
     assert.match(enriched.browserProgress?.summary ?? "", /selector ambiguity/i);
     assert.match(enriched.browserProgress?.recommendedNext ?? "", /snapshot/i);
   });
+
+  it("marks weak search-result pages as low-trust stalled browsing", () => {
+    const enriched = enrichBrowserSituation(createWeakSearchBatch(), "2026-03-15T11:00:03Z");
+
+    assert.equal(enriched.browserState?.domainTrust, "low");
+    assert.equal(enriched.browserProgress?.sourceTrust, "low");
+    assert.equal(enriched.browserProgress?.state, "stalled");
+    assert.match(enriched.browserProgress?.recommendedNext ?? "", /official|authoritative/i);
+  });
+
+  it("classifies government pages as high-trust article-like sources", () => {
+    const enriched = enrichBrowserSituation({
+      taskInstruction: "산업기능요원의 해외여행 허가 서류를 정리해줘",
+      conversationHistory: [],
+      triggeredBy: "manual",
+      anomalies: [],
+      batch: [{
+        step: 1,
+        timestamp: "2026-03-15T11:00:01Z",
+        tool: "agent-browser",
+        input: "open https://www.mma.go.kr/contents.do?mc=mma0000789",
+        output: { title: "전문연구.산업기능요원 국외출장 등 - 병무청" },
+        durationMs: 200,
+        status: "ok",
+        metadata: {
+          url: "https://www.mma.go.kr/contents.do?mc=mma0000789",
+          title: "전문연구.산업기능요원 국외출장 등 - 병무청",
+        },
+      }],
+    }, "2026-03-15T11:00:03Z");
+
+    assert.equal(enriched.browserState?.pageKind, "article");
+    assert.equal(enriched.browserState?.domainTrust, "high");
+    assert.equal(enriched.browserProgress?.goalRelevance, "high");
+  });
 });
 
 function createBatch(): LogBatch {
@@ -103,6 +138,32 @@ function createFailureBatch(): LogBatch {
           url: "https://openai.com/careers",
           title: "Careers at OpenAI",
           browserAction: "click",
+        },
+      },
+    ],
+  };
+}
+
+function createWeakSearchBatch(): LogBatch {
+  return {
+    taskInstruction: "산업기능요원의 해외여행 허가 서류를 찾아서 정리해줘",
+    conversationHistory: [],
+    triggeredBy: "manual",
+    anomalies: [],
+    batch: [
+      {
+        step: 1,
+        timestamp: "2026-03-15T11:00:01Z",
+        tool: "agent-browser",
+        input: "open https://www.google.com/search?q=산업기능요원+해외여행+허가+서류",
+        output: {
+          title: "산업기능요원 해외여행 허가 서류 - Google Search",
+        },
+        durationMs: 200,
+        status: "ok",
+        metadata: {
+          url: "https://www.google.com/search?q=산업기능요원+해외여행+허가+서류",
+          title: "산업기능요원 해외여행 허가 서류 - Google Search",
         },
       },
     ],

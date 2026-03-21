@@ -11,6 +11,7 @@ export type BottleneckKind =
   | "missing_target"
   | "navigation_drift"
   | "research_without_synthesis"
+  | "weak_source_churn"
   | "tool_failure_without_fallback"
   | "retry_loop"
   | "no_progress"
@@ -21,6 +22,7 @@ export type RecoveryAction =
   | "retry_with_refined_selector"
   | "refresh_browser_state"
   | "reconfirm_current_page"
+  | "prefer_official_source"
   | "switch_to_extraction"
   | "switch_to_synthesis"
   | "switch_tool_or_strategy"
@@ -78,8 +80,40 @@ export function assessBottleneck(
     .at(-1);
   const browserReason = context.browserProgress?.reason?.toLowerCase() ?? "";
   const observationLoop = detectObservationLoop(context.recentLogs);
+  const searchEngineSwitches = countWeakSearchEngineVisits(context.recentLogs);
   const collectionTask = isCollectionTask(context.taskInstruction.toLowerCase());
   const distinctCollectionItems = context.collectionState?.distinctItems ?? countDistinctCollectionItems(context.recentLogs);
+
+  if (
+    context.browserState?.pageKind === "search_results"
+    && context.browserState.domainTrust === "low"
+    && searchEngineSwitches >= 3
+  ) {
+    return {
+      kind: "weak_source_churn",
+      severity: "warning",
+      confidence: 0.9,
+      summary: "The actor is bouncing across weak search pages instead of converging on an authoritative source.",
+      diagnosis: "Repeated visits to low-trust search domains suggest the task is stuck in search-engine churn.",
+      evidence: [
+        `Weak search visits detected: ${searchEngineSwitches}.`,
+        context.browserState.url ? `Current URL: ${context.browserState.url}` : "Current page is a low-trust search result.",
+      ],
+      recoverable: true,
+      recoveryPlan: {
+        action: "prefer_official_source",
+        summary: "Stop broad searching and navigate directly to the most authoritative likely source.",
+        instructions: [
+          "Stop rotating between search engines and generic aggregators.",
+          "Identify the primary organization or institution behind the task.",
+          "Navigate directly to the official domain or a government/documentation source before continuing.",
+        ],
+        humanEscalationNeeded: false,
+        maxAttempts: 1,
+        targetPhase: "source_selection",
+      },
+    };
+  }
 
   if (browserReason.includes("matched multiple elements")) {
     return {
@@ -315,6 +349,17 @@ function detectObservationLoop(recentLogs: ToolExecutionRecord[]): boolean {
   return recentBrowserLogs.every((record) =>
     /^(get url|get title|snapshot)$/i.test(record.input.trim()),
   );
+}
+
+function countWeakSearchEngineVisits(recentLogs: ToolExecutionRecord[]): number {
+  const urls = recentLogs
+    .filter((record) => record.tool === "agent-browser")
+    .map((record) => {
+      const value = record.metadata?.url;
+      return typeof value === "string" ? value.toLowerCase() : "";
+    })
+    .filter((url) => /(google|bing|naver|duckduckgo)\./.test(url));
+  return new Set(urls).size;
 }
 
 function isCollectionTask(taskInstruction: string): boolean {
