@@ -36,6 +36,8 @@ import { type RuntimeAdapterSelectionOptions } from "./runtime-session-adapter.j
 import { type TaskPairRuntimeState } from "./task-pair-state.js";
 import { type TaskPhaseAssessment, assessTaskPhase } from "../supervisor/phase.js";
 import { enrichBrowserSituation } from "./browser-situation.js";
+import { MemoryHarness } from "../memory/harness.js";
+import { type RetrievedMemoryContext } from "../memory/types.js";
 import {
   InProcessSupervisorSessionBootstrapper,
   type SupervisorInterventionListenerRequest,
@@ -84,6 +86,8 @@ export class TaskPairManager {
   private supervisorLoopActive = false;
   private supervisorObservationInFlight = false;
   private supervisorInterventionUnsubscribe: (() => void) | null = null;
+  private readonly memoryContextCache = new Map<string, RetrievedMemoryContext>();
+  private readonly reviewedSessions = new Set<string>();
 
   private constructor(
     private readonly sessionManager: SessionManager,
@@ -93,6 +97,7 @@ export class TaskPairManager {
     private readonly supervisorEngine: SupervisorEngine,
     private readonly supervisorBootstrapper: SupervisorSessionBootstrapper,
     private readonly eventBus?: LumoEventBus,
+    private readonly memoryHarness?: MemoryHarness,
   ) {}
 
   static async create(
@@ -106,7 +111,9 @@ export class TaskPairManager {
       eventSink?: LumoEventBus;
     },
   ): Promise<TaskPairManager> {
+    const nowFn = now ?? (() => new Date().toISOString());
     const transportAdapter = options?.transportAdapter ?? new InProcessA2AAdapter();
+    const eventSink = options?.eventSink ?? createDefaultAgentikaEventBus();
     const supervisorTransport = runtimeOptions.supervisorTransport
       ?? createSupervisorTransport(transportAdapter);
     const useLocalSupervisor = options?.supervisorBootstrapper
@@ -121,12 +128,15 @@ export class TaskPairManager {
       sessionManager,
       supervisorTransport,
       transportAdapter,
-      now ?? (() => new Date().toISOString()),
+      nowFn,
       new SupervisorEngine({
         client: createConfiguredSupervisorClient(config),
       }),
       options?.supervisorBootstrapper ?? new InProcessSupervisorSessionBootstrapper(),
-        options?.eventSink ?? createDefaultAgentikaEventBus(),
+      eventSink,
+      eventSink
+        ? new MemoryHarness(eventSink, nowFn)
+        : undefined,
     );
   }
 
@@ -333,7 +343,7 @@ export class TaskPairManager {
         : undefined,
       onDecision: safeCallbacks.onDecision
         ? (decision) => {
-          const pair = currentPair();
+    const pair = currentPair();
           void this.eventBus?.publish({
             topic: `task.${pair.taskId}.events`,
             type: "supervisor.decision",
@@ -402,6 +412,9 @@ export class TaskPairManager {
             occurredAt: this.now(),
           },
         });
+        if (isTerminalTaskStatus(status)) {
+          void this.reviewCompletedPair(pair, status);
+        }
         safeCallbacks.onStatusChange?.(pair, status);
       },
     };
@@ -416,6 +429,7 @@ export class TaskPairManager {
     const recentLogs = pair.session.runtime.actorLogs.slice(-20);
     const latestProgress = pair.supervisorProgress.at(-1);
     const recentEventContext = await this.readRecentAgentikaEventContext(pair);
+    const memoryContext = await this.getMemoryContext(pair, "supervisor_observation");
     const input = buildSupervisorInputEnvelope(createObservationBatch(pair, recentLogs), {
       occurredAt: this.now(),
       currentStatus: pair.pairState.actor.status,
@@ -425,6 +439,8 @@ export class TaskPairManager {
       recentSupervisorDecisionEvents: recentEventContext.supervisorDecisionEvents,
       recentAnomalyEvents: recentEventContext.anomalyEvents,
       recentActorProgressEvents: recentEventContext.actorProgressEvents,
+      priorLessons: memoryContext?.lessons,
+      priorSkills: memoryContext?.skills,
     });
     const output = await this.supervisorEngine.evaluate({
       batch: createObservationBatch(pair, recentLogs),
@@ -550,6 +566,7 @@ export class TaskPairManager {
         recentLogs: enrichedBatch.recentLogs ?? enrichedBatch.batch,
       });
     const recentEventContext = await this.readRecentAgentikaEventContext(pair);
+    const memoryContext = await this.getMemoryContext(pair, "bottleneck_recovery");
     const input = buildSupervisorInputEnvelope(enrichedBatch, {
       occurredAt: this.now(),
       currentStatus: pair.pairState.actor.status,
@@ -560,6 +577,8 @@ export class TaskPairManager {
       recentSupervisorDecisionEvents: recentEventContext.supervisorDecisionEvents,
       recentAnomalyEvents: recentEventContext.anomalyEvents,
       recentActorProgressEvents: recentEventContext.actorProgressEvents,
+      priorLessons: memoryContext?.lessons,
+      priorSkills: memoryContext?.skills,
     });
     await this.supervisorBootstrapper.deliverProgress({
       pairId: pair.pairState.pairId,
@@ -623,6 +642,43 @@ export class TaskPairManager {
             : undefined,
         })),
     };
+  }
+
+  private async getMemoryContext(
+    pair: ManagedTaskPair,
+    appliedTo: "task_start" | "supervisor_observation" | "bottleneck_recovery",
+  ): Promise<RetrievedMemoryContext | undefined> {
+    if (!this.memoryHarness) {
+      return undefined;
+    }
+    const cacheKey = `${pair.session.runtime.sessionId}:${appliedTo}`;
+    const cached = this.memoryContextCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    const context = await this.memoryHarness.retrieveForInstruction({
+      taskId: pair.taskId,
+      sessionId: pair.session.runtime.sessionId,
+      instruction: pair.session.runtime.task.context.instruction.text,
+      appliedTo,
+    });
+    this.memoryContextCache.set(cacheKey, context);
+    return context;
+  }
+
+  private async reviewCompletedPair(pair: ManagedTaskPair, status: TaskStatus): Promise<void> {
+    if (!this.memoryHarness) {
+      return;
+    }
+    const reviewKey = `${pair.session.runtime.sessionId}:${status}`;
+    if (this.reviewedSessions.has(reviewKey)) {
+      return;
+    }
+    this.reviewedSessions.add(reviewKey);
+    await this.memoryHarness.reviewCompletedSession({
+      session: pair.session,
+      finalStatus: status,
+    });
   }
 
   private attachSeparateSupervisorInterventionListener(pair: ManagedTaskPair): void {
@@ -858,6 +914,10 @@ function isTaskStatus(value: unknown): value is TaskStatus {
     || value === "completed"
     || value === "failed"
     || value === "halted";
+}
+
+function isTerminalTaskStatus(value: TaskStatus): boolean {
+  return value === "completed" || value === "failed" || value === "halted";
 }
 
 function isCollectionState(

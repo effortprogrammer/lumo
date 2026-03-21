@@ -49,6 +49,7 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
       triggeredBy: input.triggeredBy,
     };
     const recentLogs = batch.recentLogs ?? batch.batch;
+    const memoryGuidance = buildMemoryGuidance(input);
     const taskPhase = input.taskPhase ?? assessTaskPhase({
       taskInstruction: batch.taskInstruction,
       browserState: batch.browserState,
@@ -62,13 +63,13 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
       taskPhase.recommendation?.targetPhase === "synthesis" &&
       latestLog?.status !== "error"
     ) {
-      return {
-        status: "warning",
-        confidence: Math.max(taskPhase.confidence, 0.88),
-        reason: taskPhase.recommendation.reason,
-        suggestion: taskPhase.recommendation.instructions.join(" "),
-        action: "feedback",
-      };
+        return {
+          status: "warning",
+          confidence: Math.max(taskPhase.confidence, 0.88),
+          reason: taskPhase.recommendation.reason,
+          suggestion: joinGuidance(taskPhase.recommendation.instructions.join(" "), memoryGuidance),
+          action: "feedback",
+        };
     }
 
     const bottleneck = assessBottleneck({
@@ -81,39 +82,39 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
       collectionState: input.collectionState,
     });
     if (bottleneck) {
-      return {
-        status: bottleneck.severity,
-        confidence: bottleneck.confidence,
-        reason: bottleneck.diagnosis,
-        suggestion: bottleneck.recoveryPlan.instructions.join(" "),
-        action: bottleneck.recoverable ? "feedback" : "halt",
-      };
+        return {
+          status: bottleneck.severity,
+          confidence: bottleneck.confidence,
+          reason: bottleneck.diagnosis,
+          suggestion: joinGuidance(bottleneck.recoveryPlan.instructions.join(" "), memoryGuidance),
+          action: bottleneck.recoverable ? "feedback" : "halt",
+        };
     }
 
     const latestAnomaly = [...batch.anomalies]
       .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt))
       .at(-1);
     if (latestAnomaly) {
-      return {
-        status: latestAnomaly.severity,
-        confidence: latestAnomaly.severity === "critical" ? 0.97 : 0.82,
-        reason: latestAnomaly.message,
-        suggestion: latestAnomaly.severity === "critical"
-          ? "Stop the task and ask the operator to inspect the runtime anomaly."
-          : "Adjust the strategy before continuing.",
-        action: latestAnomaly.severity === "critical" ? "halt" : "feedback",
-      };
+        return {
+          status: latestAnomaly.severity,
+          confidence: latestAnomaly.severity === "critical" ? 0.97 : 0.82,
+          reason: latestAnomaly.message,
+          suggestion: joinGuidance(latestAnomaly.severity === "critical"
+            ? "Stop the task and ask the operator to inspect the runtime anomaly."
+            : "Adjust the strategy before continuing.", memoryGuidance),
+          action: latestAnomaly.severity === "critical" ? "halt" : "feedback",
+        };
     }
 
     const riskyRecord = batch.batch.find((record) => (record.riskKeywords?.length ?? 0) > 0);
     if (riskyRecord) {
-      return {
-        status: "critical",
-        confidence: 0.95,
-        reason: `Risk keyword detected in ${riskyRecord.tool} step ${riskyRecord.step}.`,
-        suggestion: "Stop the task and request operator review.",
-        action: "halt",
-      };
+        return {
+          status: "critical",
+          confidence: 0.95,
+          reason: `Risk keyword detected in ${riskyRecord.tool} step ${riskyRecord.step}.`,
+          suggestion: joinGuidance("Stop the task and request operator review.", memoryGuidance),
+          action: "halt",
+        };
     }
 
     const failedRecord = batch.batch.find(
@@ -125,8 +126,9 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
           status: "warning",
           confidence: 0.84,
           reason: batch.browserProgress.reason,
-          suggestion: batch.browserProgress.recommendedNext
+          suggestion: joinGuidance(batch.browserProgress.recommendedNext
             ?? "Inspect the current page state and retry with a more precise browser command.",
+            memoryGuidance),
           action: "feedback",
         };
       }
@@ -135,7 +137,7 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
         status: "warning",
         confidence: 0.8,
         reason: `Command failed in ${failedRecord.tool} step ${failedRecord.step}.`,
-        suggestion: "Adjust the command or inspect stderr before continuing.",
+        suggestion: joinGuidance("Adjust the command or inspect stderr before continuing.", memoryGuidance),
         action: "feedback",
       };
     }
@@ -150,7 +152,7 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
         status: "warning",
         confidence: 0.7,
         reason: "Repeated tool input detected in consecutive steps.",
-        suggestion: "Change strategy before repeating the same command again.",
+        suggestion: joinGuidance("Change strategy before repeating the same command again.", memoryGuidance),
         action: "feedback",
       };
     }
@@ -162,6 +164,17 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
       action: "continue",
     };
   }
+}
+
+function buildMemoryGuidance(input: SupervisorInputEnvelope): string | undefined {
+  const skillLine = input.priorSkills?.[0]?.playbook?.[0];
+  const lessonLine = input.priorLessons?.[0]?.recommendedAction;
+  const fragments = [skillLine, lessonLine].filter((value): value is string => Boolean(value));
+  return fragments.length > 0 ? `Use relevant prior guidance: ${fragments.join(" ")}` : undefined;
+}
+
+function joinGuidance(base: string, guidance: string | undefined): string {
+  return guidance ? `${base} ${guidance}` : base;
 }
 
 function assessLifecycleCooldown(

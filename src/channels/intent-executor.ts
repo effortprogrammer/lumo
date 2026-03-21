@@ -1,9 +1,12 @@
 import { type SessionRuntimeCallbacks, type SessionManager } from "../runtime/session-manager.js";
+import { buildMemoryScope } from "../memory/promotion-policy.js";
+import { type RetrievedMemoryContext } from "../memory/types.js";
 import { type IntentEnvelope, type IntentTaskRef } from "./intent.js";
 
 export interface ExecuteIntentOptions {
   sessionManager: SessionManager;
   createSessionCallbacks?: () => SessionRuntimeCallbacks | undefined;
+  prepareTaskInstruction?: (instruction: string) => Promise<RetrievedMemoryContext | undefined>;
 }
 
 export async function executeIntentEnvelope(
@@ -21,8 +24,11 @@ export async function executeIntentEnvelope(
       return "Tell me what you want to start.";
     }
 
+    const retrieved = await options.prepareTaskInstruction?.(envelope.instruction);
+    const instruction = applyRetrievedGuidance(envelope.instruction, retrieved);
+
     options.sessionManager.createTask(
-      envelope.instruction,
+      instruction,
       options.createSessionCallbacks?.(),
     );
     return "Started a new task.";
@@ -63,6 +69,23 @@ export async function executeIntentEnvelope(
   }
 
   return "No active task.";
+}
+
+function applyRetrievedGuidance(
+  instruction: string,
+  retrieved: RetrievedMemoryContext | undefined,
+): string {
+  if (!retrieved || retrieved.guidanceLines.length === 0) {
+    return instruction;
+  }
+  const scope = buildMemoryScope(instruction);
+  return [
+    instruction,
+    "",
+    "[Memory Harness Guidance]",
+    `Task pattern: ${scope.taskPattern}`,
+    ...retrieved.guidanceLines.map((line, index) => `${index + 1}. ${line}`),
+  ].join("\n");
 }
 
 function assertTaskRef(sessionManager: SessionManager, taskRef: IntentTaskRef): void {

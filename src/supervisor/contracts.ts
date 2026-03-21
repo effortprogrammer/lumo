@@ -1,6 +1,7 @@
 import { type BrowserProgressAssessment, type BrowserStateSnapshot, type TaskStatus, type ToolExecutionRecord } from "../domain/task.js";
 import { type LumoStoredEvent } from "../event/types.js";
 import { type LogBatch } from "../logging/log-batcher.js";
+import { type MemoryLessonRecord, type MemorySkillRecord } from "../memory/types.js";
 import { type BottleneckAssessment, type RecoveryPlan } from "./bottleneck.js";
 import { type SupervisorDecision } from "./decision.js";
 import { type SupervisorEscalationReport } from "./escalation-report.js";
@@ -37,6 +38,8 @@ export interface SupervisorInputEnvelope {
     taskPhase?: TaskPhaseAssessment;
     anomalies?: LogBatch["anomalies"];
   }>;
+  priorLessons?: MemoryLessonRecord[];
+  priorSkills?: MemorySkillRecord[];
   collectionState?: {
     itemsCollected: number;
     distinctItems: number;
@@ -65,6 +68,8 @@ export function buildSupervisorInputEnvelope(
     recentSupervisorDecisionEvents?: SupervisorInputEnvelope["recentSupervisorDecisionEvents"];
     recentAnomalyEvents?: SupervisorInputEnvelope["recentAnomalyEvents"];
     recentActorProgressEvents?: SupervisorInputEnvelope["recentActorProgressEvents"];
+    priorLessons?: SupervisorInputEnvelope["priorLessons"];
+    priorSkills?: SupervisorInputEnvelope["priorSkills"];
   },
 ): SupervisorInputEnvelope {
   const recentLogs = batch.recentLogs ?? batch.batch;
@@ -77,6 +82,8 @@ export function buildSupervisorInputEnvelope(
     recentSupervisorDecisionEvents: options.recentSupervisorDecisionEvents,
     recentAnomalyEvents: options.recentAnomalyEvents,
     recentActorProgressEvents: options.recentActorProgressEvents,
+    priorLessons: options.priorLessons,
+    priorSkills: options.priorSkills,
     collectionState: options.collectionState,
     browserState: batch.browserState,
     browserProgress: batch.browserProgress,
