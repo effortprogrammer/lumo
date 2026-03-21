@@ -14,14 +14,10 @@ import {
   type DiscordGatewayHealthcheckResult,
 } from "../channels/discord-adapter.js";
 
-type SupervisorClient = LumoConfig["supervisor"]["client"];
 type DiscordInboundMode = LumoConfig["channels"]["adapters"]["discord"]["inbound"]["mode"];
 
 export interface SetupAnswers {
   configPath: string;
-  actorModel: string;
-  supervisorModel: string;
-  supervisorClient: SupervisorClient;
   discordEnabled: boolean;
   discordInboundMode: DiscordInboundMode;
   webhookUrl?: string;
@@ -37,9 +33,6 @@ export interface SetupCliOptions {
   help: boolean;
   nonInteractive: boolean;
   configPath?: string;
-  actorModel?: string;
-  supervisorModel?: string;
-  supervisorClient?: string;
   discordEnabled?: string;
   discordInboundMode?: string;
   webhookUrl?: string;
@@ -119,9 +112,6 @@ export function parseSetupCliArgs(
     help: false,
     nonInteractive: parseBooleanString(env.LUMO_SETUP_NON_INTERACTIVE) ?? false,
     configPath: env.LUMO_SETUP_CONFIG_PATH,
-    actorModel: env.LUMO_SETUP_ACTOR_MODEL,
-    supervisorModel: env.LUMO_SETUP_SUPERVISOR_MODEL,
-    supervisorClient: env.LUMO_SETUP_SUPERVISOR_CLIENT,
     discordEnabled: env.LUMO_SETUP_DISCORD_ENABLED,
     discordInboundMode: env.LUMO_SETUP_DISCORD_INBOUND_MODE,
     webhookUrl: env.LUMO_SETUP_DISCORD_WEBHOOK_URL,
@@ -163,15 +153,6 @@ export function parseSetupCliArgs(
     switch (key) {
       case "config":
         options.configPath = next;
-        break;
-      case "actor-model":
-        options.actorModel = next;
-        break;
-      case "supervisor-model":
-        options.supervisorModel = next;
-        break;
-      case "supervisor-client":
-        options.supervisorClient = next;
         break;
       case "discord-enabled":
         options.discordEnabled = next;
@@ -218,17 +199,6 @@ export function resolveSetupAnswers(
     options.configPath ?? "./lumo.config.json",
     "config path",
   );
-  const actorModel = requiredTrimmedValue(
-    options.actorModel ?? defaults.actor.model,
-    "actor model",
-  );
-  const supervisorModel = requiredTrimmedValue(
-    options.supervisorModel ?? defaults.supervisor.model,
-    "supervisor model",
-  );
-  const supervisorClient = parseSupervisorClient(
-    options.supervisorClient ?? defaults.supervisor.client,
-  );
   const discordEnabled = parseBooleanInput(
     options.discordEnabled,
     defaults.channels.adapters.discord.enabled,
@@ -262,9 +232,6 @@ export function resolveSetupAnswers(
 
   return {
     configPath,
-    actorModel,
-    supervisorModel,
-    supervisorClient,
     discordEnabled,
     discordInboundMode,
     webhookUrl,
@@ -291,16 +258,6 @@ export function buildSetupConfig(
   const discordWebhookEnabled = Boolean(answers.webhookUrl);
 
   return {
-    actor: {
-      model: answers.actorModel,
-    },
-    supervisor: {
-      model: answers.supervisorModel,
-      client: answers.supervisorClient,
-      openaiCompatible: {
-        enabled: answers.supervisorClient === "openai-compatible",
-      },
-    },
     alerts: {
       enableTerminalBell: answers.enableTerminalAlerts,
       channels: {
@@ -432,9 +389,6 @@ export function getSetupUsage(): string {
     "  --non-interactive                Generate config without prompts using flags/env",
     "  --force                          Overwrite an existing config file without confirmation",
     "  --config <path>                  Output config path",
-    "  --actor-model <model>            Default actor model",
-    "  --supervisor-model <model>       Supervisor model",
-    "  --supervisor-client <client>     mock | heuristic | openai-compatible",
     "  --discord-enabled <bool>         true | false",
     "  --discord-inbound-mode <mode>    file | gateway",
     "  --discord-webhook-url <url>      Optional Discord webhook URL",
@@ -463,30 +417,37 @@ async function runInteractiveWizard(
     );
 
   try {
+    writeLine(writer, "Welcome to Lumo setup.");
+    writeLine(writer, "This setup only configures Lumo-specific integrations.");
+    writeLine(writer, "");
+    const setupMode = await promptSelectValue(
+      prompter,
+      "Setup mode",
+      [
+        { label: "Quickstart (recommended)", value: "quickstart" },
+        { label: "Custom", value: "custom" },
+      ],
+      "quickstart",
+    );
+    if (setupMode === "quickstart") {
+      const answers = buildQuickstartAnswers(options, defaults);
+      writeLine(writer, "");
+      writeLine(writer, formatQuickstartPreview(answers));
+      const confirmed = await promptBooleanSelect(
+        prompter,
+        "Write this quickstart config",
+        true,
+      );
+      if (!confirmed) {
+        throw new Error("Setup cancelled before writing config.");
+      }
+      return answers;
+    }
+
     const configPath = await promptWithDefault(
       prompter,
       "Config path",
       options.configPath ?? "./lumo.config.json",
-    );
-    const actorModel = await promptWithDefault(
-      prompter,
-      "Actor model default",
-      options.actorModel ?? defaults.actor.model,
-    );
-    const supervisorClient = await promptSelectWithCustomInput(
-      prompter,
-      "Supervisor client",
-      [
-        { label: "mock", value: "mock" },
-        { label: "heuristic", value: "heuristic" },
-        { label: "openai-compatible", value: "openai-compatible" },
-      ],
-      options.supervisorClient ?? defaults.supervisor.client,
-    );
-    const supervisorModel = await promptWithDefault(
-      prompter,
-      "Supervisor model",
-      options.supervisorModel ?? defaults.supervisor.model,
     );
     const discordEnabled = await promptBoolean(
       prompter,
@@ -497,37 +458,30 @@ async function runInteractiveWizard(
         "discord enablement",
       ),
     );
-
     let discordInboundMode = defaults.channels.adapters.discord.inbound.mode;
     let webhookUrl = trimOptionalValue(options.webhookUrl);
     let tokenEnvVar = defaults.channels.adapters.discord.inbound.tokenEnvVar;
     let allowedChannels = splitCommaList(options.allowedChannels);
     let allowedUsers = splitCommaList(options.allowedUsers);
     let mentionPrefix = trimOptionalValue(options.mentionPrefix);
-
+    let enableTerminalAlerts = parseBooleanInput(
+      options.enableTerminalAlerts,
+      defaults.alerts.channels.terminal.enabled,
+      "terminal alerts",
+    );
     if (discordEnabled) {
-      discordInboundMode = parseDiscordInboundMode(
-        await promptSelectWithCustomInput(
-          prompter,
-          "Discord inbound mode",
-          [
-            { label: "file", value: "file" },
-            { label: "gateway", value: "gateway" },
-          ],
-          options.discordInboundMode ?? defaults.channels.adapters.discord.inbound.mode,
-        ),
-      );
+      discordInboundMode = "gateway";
       webhookUrl = trimOptionalValue(
         await promptWithDefault(
           prompter,
-          "Discord webhook URL (optional)",
+          "Discord webhook URL for alerts (optional)",
           options.webhookUrl ?? "",
         ),
       );
       tokenEnvVar = requiredTrimmedValue(
         await promptWithDefault(
           prompter,
-          "Discord token env var name",
+          "Discord bot token env var name",
           options.tokenEnvVar ?? defaults.channels.adapters.discord.inbound.tokenEnvVar,
         ),
         "discord token env var name",
@@ -554,23 +508,15 @@ async function runInteractiveWizard(
         ),
       );
     }
-
-    const enableTerminalAlerts = await promptBoolean(
+    enableTerminalAlerts = await promptBoolean(
       prompter,
       "Enable terminal alerts",
-      parseBooleanInput(
-        options.enableTerminalAlerts,
-        defaults.alerts.channels.terminal.enabled,
-        "terminal alerts",
-      ),
+      enableTerminalAlerts,
     );
 
     const answers = resolveSetupAnswers({
       ...options,
       configPath,
-      actorModel,
-      supervisorModel,
-      supervisorClient,
       discordEnabled: String(discordEnabled),
       discordInboundMode,
       webhookUrl,
@@ -669,41 +615,6 @@ async function promptBooleanSelect(
     fallback ? "yes" : "no",
   );
   return value === "yes";
-}
-
-async function promptSelectWithCustomInput<TValue extends string>(
-  prompter: SetupPrompter,
-  label: string,
-  choices: readonly SelectChoice<TValue>[],
-  fallback: string,
-): Promise<string> {
-  const customLabel = "Custom input...";
-  const fallbackIndex = choices.findIndex((choice) => choice.value === fallback);
-  const options = [
-    ...choices.map((choice) => choice.label),
-    customLabel,
-  ];
-
-  if (prompter.select) {
-    const selectedIndex = await prompter.select(
-      `${label} (use arrow keys, Enter to confirm)`,
-      options,
-      fallbackIndex >= 0 ? fallbackIndex : choices.length,
-    );
-    if (selectedIndex < choices.length) {
-      return choices[selectedIndex].value;
-    }
-  } else {
-    const selectedValue = await fallbackSelectValue(prompter, label, choices, fallback, true);
-    if (selectedValue != null) {
-      return selectedValue;
-    }
-  }
-
-  return requiredTrimmedValue(
-    await prompter.ask(`Custom value for ${label}: `),
-    label,
-  );
 }
 
 async function promptSelectValue<TValue extends string>(
@@ -830,14 +741,6 @@ function parseBooleanString(value: string | undefined): boolean | undefined {
   }
 
   return undefined;
-}
-
-function parseSupervisorClient(value: string): SupervisorClient {
-  if (value === "mock" || value === "heuristic" || value === "openai-compatible") {
-    return value;
-  }
-
-  throw new Error(`Unsupported supervisor client: ${value}`);
 }
 
 function parseDiscordInboundMode(value: string): DiscordInboundMode {
@@ -1004,14 +907,35 @@ function normalizeSelectedIndex(index: number, optionCount: number): number {
   return index;
 }
 
+function buildQuickstartAnswers(
+  options: SetupCliOptions,
+  defaults: LumoConfig,
+): SetupAnswers {
+  return resolveSetupAnswers({
+    ...options,
+    configPath: options.configPath ?? "./lumo.config.json",
+    discordEnabled: "false",
+    discordInboundMode: defaults.channels.adapters.discord.inbound.mode,
+    enableTerminalAlerts: String(defaults.alerts.channels.terminal.enabled),
+  }, defaults);
+}
+
+function formatQuickstartPreview(answers: SetupAnswers): string {
+  return [
+    "Quickstart defaults",
+    "-------------------",
+    `Config path: ${answers.configPath}`,
+    "Discord integration: disabled",
+    "Discord webhook alerts: disabled",
+    `Terminal alerts: ${answers.enableTerminalAlerts ? "enabled" : "disabled"}`,
+  ].join("\n");
+}
+
 export function formatSetupSummary(answers: SetupAnswers): string {
   return [
     "Setup summary",
     "-------------",
     `Config path: ${answers.configPath}`,
-    `Actor model: ${answers.actorModel}`,
-    `Supervisor client: ${answers.supervisorClient}`,
-    `Supervisor model: ${answers.supervisorModel}`,
     `Discord enabled: ${answers.discordEnabled ? "Yes" : "No"}`,
     `Discord inbound mode: ${answers.discordEnabled ? answers.discordInboundMode : "(disabled)"}`,
     `Discord webhook URL: ${answers.webhookUrl ?? "(none)"}`,

@@ -1,5 +1,6 @@
 import { type TaskStatus } from "../domain/task.js";
 import { type SupervisorDecision } from "../supervisor/decision.js";
+import { type SupervisorEscalationReport } from "../supervisor/escalation-report.js";
 
 export interface ChannelParticipant {
   userId: string;
@@ -52,6 +53,7 @@ export interface ChannelSupervisorAlertEvent extends BaseChannelOutboundEvent {
   taskId: string;
   severity: "warning" | "critical";
   decision: SupervisorDecision;
+  report?: SupervisorEscalationReport;
 }
 
 export type ChannelOutboundEvent =

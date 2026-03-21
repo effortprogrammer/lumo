@@ -1,8 +1,10 @@
+import { type TaskStatus } from "../domain/task.js";
 import { type IntentEnvelope, isIntentEnvelope, normalizeIntentEnvelope } from "./intent.js";
 
 export interface IntentResolverContext {
   hasActiveTask: boolean;
   currentTaskId: string | null;
+  currentTaskStatus: TaskStatus | null;
 }
 
 export interface IntentResolver {
@@ -77,13 +79,27 @@ export class MockModelIntentResolver implements ModelIntentResolver {
       return clarify("That request is ambiguous. Say what task to start or which control action you want.");
     }
 
-    if (context.hasActiveTask && /^(also|next|then|and|follow up)\b/i.test(trimmed)) {
+    if (
+      context.hasActiveTask &&
+      context.currentTaskStatus !== "halted" &&
+      /^(also|next|then|and|follow up)\b/i.test(trimmed)
+    ) {
       return {
         intent: "followup",
         task_ref: "current",
         instruction: trimmed,
         confidence: 0.82,
         reason: "Detected follow-up phrasing for the active task.",
+      };
+    }
+
+    if (context.hasActiveTask && context.currentTaskStatus === "halted") {
+      return {
+        intent: "resume",
+        task_ref: "current",
+        instruction: trimmed,
+        confidence: 0.9,
+        reason: "The active task is halted, so treating the request as recovery guidance to resume with.",
       };
     }
 
@@ -125,6 +141,16 @@ export function resolveRuleBasedIntent(
     }
 
     if (aliasMatch.command === "followup") {
+      if (context.currentTaskStatus === "halted") {
+        return {
+          intent: "resume",
+          task_ref: "current",
+          instruction,
+          confidence: 0.99,
+          reason: "Matched a follow-up alias while the task is halted, so resuming with the new guidance.",
+        };
+      }
+
       return {
         intent: "followup",
         task_ref: "current",

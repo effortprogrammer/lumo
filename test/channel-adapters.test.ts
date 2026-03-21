@@ -351,6 +351,93 @@ describe("channel adapters", () => {
     assert.match(logs.join("\n"), /logging in with bot token/);
     assert.match(logs.join("\n"), /connected as bot-1/);
   });
+
+  it("includes escalation context in outbound Discord supervisor alerts when a report is present", async () => {
+    const requests: Array<{ url: string; body: string }> = [];
+    const adapter = new DiscordChannelAdapter({
+      webhookUrl: "https://discord.example/webhook",
+      fetchImpl: async (input, init) => {
+        requests.push({
+          url: String(input),
+          body: typeof init?.body === "string" ? init.body : "",
+        });
+        return new Response("", { status: 200 });
+      },
+    });
+
+    const result = await adapter.send({
+      type: "supervisor.alert",
+      target: {
+        adapter: "discord",
+        conversationId: "conv-1",
+      },
+      occurredAt: "2026-03-12T00:00:00Z",
+      taskId: "task-1",
+      severity: "critical",
+      decision: {
+        status: "critical",
+        confidence: 0.92,
+        reason: "manual review required",
+        suggestion: "inspect the blocked page",
+        action: "halt",
+      },
+      report: {
+        taskId: "task-1",
+        severity: "critical",
+        status: "halted",
+        title: "Actor was halted due to browser state unclear",
+        summary: "The browser is stuck behind a modal.",
+        anomalyKinds: ["browser_stuck"],
+        reasons: ["The browser is stuck behind a modal."],
+        recommendedAction: "halted-awaiting-human",
+        supervisorDecision: {
+          confidence: 0.92,
+          reason: "manual review required",
+          suggestion: "inspect the blocked page",
+          action: "halt",
+        },
+        evidence: {
+          latestStep: 4,
+          latestTool: "agent-browser",
+          latestInput: "click checkout",
+          url: "https://example.com/checkout",
+          screenshotRef: {
+            id: "shot-1",
+            path: "/tmp/shot-1.png",
+            capturedAt: "2026-03-12T00:00:00Z",
+          },
+        },
+        browserState: {
+          url: "https://example.com/checkout",
+          title: "Checkout",
+          pageKind: "modal",
+        },
+        bottleneck: {
+          kind: "browser_state_unclear",
+          severity: "critical",
+          confidence: 0.92,
+          summary: "The actor needs operator guidance.",
+          diagnosis: "A modal blocks the main action.",
+          evidence: ["Modal overlay detected."],
+          recoverable: false,
+          recoveryPlan: {
+            action: "halt_and_escalate",
+            summary: "Wait for operator guidance.",
+            instructions: ["Inspect the checkout modal before resuming."],
+            humanEscalationNeeded: true,
+          },
+        },
+        occurredAt: "2026-03-12T00:00:00Z",
+      },
+    });
+
+    assert.equal(result.status, "sent");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.url, "https://discord.example/webhook");
+    assert.match(requests[0]?.body ?? "", /bottleneck=browser_state_unclear/);
+    assert.match(requests[0]?.body ?? "", /url=https:\/\/example.com\/checkout/);
+    assert.match(requests[0]?.body ?? "", /screenshot=\/tmp\/shot-1.png/);
+  });
 });
 
 class FakeDiscordGatewayClient extends EventEmitter {

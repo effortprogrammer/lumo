@@ -26,12 +26,6 @@ describe("setup wizard", () => {
         "--non-interactive",
         "--config",
         configPath,
-        "--actor-model",
-        " actor-x ",
-        "--supervisor-model",
-        " supervisor-y ",
-        "--supervisor-client",
-        "heuristic",
         "--discord-enabled",
         "true",
         "--discord-inbound-mode",
@@ -59,16 +53,6 @@ describe("setup wizard", () => {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
 
       assert.deepEqual(parsed, {
-        actor: {
-          model: "actor-x",
-        },
-        supervisor: {
-          model: "supervisor-y",
-          client: "heuristic",
-          openaiCompatible: {
-            enabled: false,
-          },
-        },
         alerts: {
           enableTerminalBell: true,
           channels: {
@@ -121,9 +105,6 @@ describe("setup wizard", () => {
                 help: false,
                 nonInteractive: true,
                 configPath,
-                actorModel: "actor",
-                supervisorModel: "supervisor",
-                supervisorClient: "mock",
                 discordEnabled: "false",
                 discordInboundMode: "file",
               })),
@@ -143,9 +124,6 @@ describe("setup wizard", () => {
             help: false,
             nonInteractive: true,
             configPath,
-            actorModel: "actor-2",
-            supervisorModel: "supervisor-2",
-            supervisorClient: "mock",
             discordEnabled: "false",
             discordInboundMode: "file",
             enableTerminalAlerts: "false",
@@ -158,7 +136,7 @@ describe("setup wizard", () => {
 
       assert.equal(overwritten.overwritten, true);
       const raw = await readFile(configPath, "utf8");
-      assert.match(raw, /actor-2/);
+      assert.match(raw, /"enableTerminalBell": false/);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -169,12 +147,6 @@ describe("setup wizard", () => {
       "--non-interactive",
       "--config",
       " ./custom.json ",
-      "--actor-model",
-      " local-actor ",
-      "--supervisor-model",
-      " supervisor ",
-      "--supervisor-client",
-      "openai-compatible",
       "--discord-enabled",
       "yes",
       "--discord-inbound-mode",
@@ -193,8 +165,6 @@ describe("setup wizard", () => {
 
     const answers = resolveSetupAnswers(options);
     assert.equal(answers.configPath, "./custom.json");
-    assert.equal(answers.actorModel, "local-actor");
-    assert.equal(answers.supervisorClient, "openai-compatible");
     assert.deepEqual(answers.allowedChannels, ["guild:1/channel:2", "thread:3"]);
     assert.deepEqual(answers.allowedUsers, ["user-1", "user-2"]);
     assert.equal(answers.mentionPrefix, "@lumo");
@@ -207,9 +177,6 @@ describe("setup wizard", () => {
           help: false,
           nonInteractive: true,
           configPath: "./lumo.config.json",
-          actorModel: "actor",
-          supervisorModel: "supervisor",
-          supervisorClient: "mock",
           discordEnabled: "true",
           discordInboundMode: "gateway",
           tokenEnvVar: "   ",
@@ -249,9 +216,6 @@ describe("setup wizard", () => {
 
     const summary = formatSetupSummary({
       configPath: "./lumo.config.json",
-      actorModel: "local-actor",
-      supervisorModel: "mock-supervisor",
-      supervisorClient: "mock",
       discordEnabled: false,
       discordInboundMode: "file",
       tokenEnvVar: "DISCORD_TOKEN",
@@ -276,13 +240,14 @@ describe("setup wizard", () => {
         error: writer,
         createPrompter: () =>
           createScriptedPrompter({
-            asks: ["", "", ""],
-            selects: [0, 1, 1, 1],
+            asks: [],
+            selects: [0, 1],
           }),
       });
 
       assert.equal(exitCode, 1);
-      assert.match(writer.buffer, /Setup summary/);
+      assert.match(writer.buffer, /Welcome to Lumo setup\./);
+      assert.match(writer.buffer, /Quickstart defaults/);
       assert.match(writer.buffer, /Setup cancelled before writing config\./);
       await assert.rejects(() => readFile(configPath, "utf8"), /ENOENT|no such file/i);
     } finally {
@@ -300,8 +265,8 @@ describe("setup wizard", () => {
         error: createWriter(),
         createPrompter: () =>
           createScriptedPrompter({
-            asks: ["", "", ""],
-            selects: [0, 1, 1, 0],
+            asks: [],
+            selects: [0, 0],
           }),
       });
 
@@ -309,17 +274,64 @@ describe("setup wizard", () => {
 
       const raw = await readFile(configPath, "utf8");
       const parsed = JSON.parse(raw) as {
-        actor: { model: string };
-        supervisor: { model: string; client: string };
         channels: { adapters: { discord: { enabled: boolean } } };
         alerts: { channels: { terminal: { enabled: boolean } } };
       };
 
-      assert.equal(parsed.actor.model, "local-actor");
-      assert.equal(parsed.supervisor.model, "mock-supervisor");
-      assert.equal(parsed.supervisor.client, "mock");
       assert.equal(parsed.channels.adapters.discord.enabled, false);
       assert.equal(parsed.alerts.channels.terminal.enabled, false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("supports interactive setup with focused Lumo integration prompts", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-quickstart-"));
+    const configPath = join(tempDir, "lumo.config.json");
+
+    try {
+      const exitCode = await runSetupCli(["--config", configPath], {
+        output: createWriter(),
+        error: createWriter(),
+        createPrompter: () =>
+          createScriptedPrompter({
+            asks: [],
+            selects: [0, 0],
+          }),
+      });
+
+      assert.equal(exitCode, 0);
+
+      const raw = await readFile(configPath, "utf8");
+      const parsed = JSON.parse(raw) as {
+        channels: { adapters: { discord: { enabled: boolean } } };
+      };
+
+      assert.equal(parsed.channels.adapters.discord.enabled, false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("shows quickstart defaults before writing", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-quickstart-preview-"));
+    const configPath = join(tempDir, "lumo.config.json");
+    const writer = createBufferingWriter();
+
+    try {
+      const exitCode = await runSetupCli(["--config", configPath], {
+        output: writer,
+        error: writer,
+        createPrompter: () =>
+          createScriptedPrompter({
+            asks: [],
+            selects: [0, 0],
+          }),
+      });
+
+      assert.equal(exitCode, 0);
+      assert.match(writer.buffer, /Quickstart defaults/);
+      assert.match(writer.buffer, /Discord integration: disabled/);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -336,12 +348,6 @@ describe("setup wizard", () => {
         "--non-interactive",
         "--config",
         passPath,
-        "--actor-model",
-        "actor",
-        "--supervisor-model",
-        "supervisor",
-        "--supervisor-client",
-        "mock",
         "--discord-enabled",
         "true",
         "--discord-inbound-mode",
@@ -371,12 +377,6 @@ describe("setup wizard", () => {
         "--non-interactive",
         "--config",
         failPath,
-        "--actor-model",
-        "actor",
-        "--supervisor-model",
-        "supervisor",
-        "--supervisor-client",
-        "mock",
         "--discord-enabled",
         "true",
         "--discord-inbound-mode",

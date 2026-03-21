@@ -18,6 +18,7 @@ describe("IntentResolverPipeline", () => {
     const envelope = await resolver.resolve("Investigate the failing checkout tests", {
       hasActiveTask: false,
       currentTaskId: null,
+      currentTaskStatus: null,
     });
 
     assert.equal(envelope.intent, "start_task");
@@ -29,6 +30,7 @@ describe("IntentResolverPipeline", () => {
     const envelope = await resolver.resolve("do it", {
       hasActiveTask: false,
       currentTaskId: null,
+      currentTaskStatus: null,
     });
 
     assert.equal(envelope.intent, "clarify");
@@ -39,18 +41,33 @@ describe("IntentResolverPipeline", () => {
     const resume = await resolver.resolve("continue with the last plan", {
       hasActiveTask: true,
       currentTaskId: "task-123",
+      currentTaskStatus: "running",
     });
     const halt = await resolver.resolve("stop this run", {
       hasActiveTask: true,
       currentTaskId: "task-123",
+      currentTaskStatus: "running",
     });
     const status = await resolver.resolve("what's the status?", {
       hasActiveTask: true,
       currentTaskId: "task-123",
+      currentTaskStatus: "running",
     });
 
     assert.equal(resume.intent, "resume");
     assert.equal(halt.intent, "halt");
     assert.equal(status.intent, "status");
+  });
+
+  it("treats fresh guidance on a halted task as recovery-oriented resume input", async () => {
+    const envelope = await resolver.resolve("search again but avoid the modal flow", {
+      hasActiveTask: true,
+      currentTaskId: "task-123",
+      currentTaskStatus: "halted",
+    });
+
+    assert.equal(envelope.intent, "resume");
+    assert.equal(envelope.task_ref, "current");
+    assert.equal(envelope.instruction, "search again but avoid the modal flow");
   });
 });

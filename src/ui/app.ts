@@ -19,7 +19,7 @@ export function LumoApp(props: { snapshot: UiTaskSnapshot }): unknown {
     React.createElement(
       Text,
       null,
-      `Actor: ${task.actor.model} | Supervisor: ${task.supervisor.model}`,
+      `Supervisor: ${task.supervisor.model}`,
     ),
     React.createElement(
       Text,

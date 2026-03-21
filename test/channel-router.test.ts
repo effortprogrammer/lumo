@@ -152,6 +152,47 @@ describe("ConversationRouter", () => {
       ["router.reply", "task.lifecycle", "supervisor.alert"],
     );
   });
+
+  it("routes halted-task guidance into a resume with extra instruction", async () => {
+    const adapter = new StubChannelAdapter();
+    const calls: string[] = [];
+    const stubSessionManager = {
+      current: {
+        runtime: {
+          task: {
+            ...createPairing(),
+            task: {
+              ...createPairing().task,
+              status: "halted" as const,
+            },
+          },
+        },
+      },
+      async resume(text?: string) {
+        calls.push(`resume:${text ?? ""}`);
+      },
+    } as SessionManager;
+    const router = new ConversationRouter({
+      sessionManager: stubSessionManager,
+      adapters: [adapter],
+      commandMapping: {
+        new: ["new"],
+        followup: ["followup", "reply"],
+        resume: ["resume"],
+        halt: ["halt"],
+        status: ["status"],
+      },
+      now: () => "2026-03-12T00:00:00Z",
+    });
+
+    await router.handleInboundMessage(createMessage("search again but avoid the modal flow"));
+
+    assert.deepEqual(calls, ["resume:search again but avoid the modal flow"]);
+    assert.equal(adapter.sent[0]?.type, "router.reply");
+    if (adapter.sent[0]?.type === "router.reply") {
+      assert.match(adapter.sent[0].text, /resumed|recovery/i);
+    }
+  });
 });
 
 function createMessage(text: string): ChannelInboundMessage {
@@ -175,7 +216,6 @@ function createPairing(): TaskPairing {
       taskId: "task-router",
       actor: {
         id: "actor",
-        model: "local-actor",
         systemPrompt: "run commands",
         tools: ["bash", "agent-browser", "coding-agent"],
       },

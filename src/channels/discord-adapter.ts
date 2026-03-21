@@ -430,13 +430,32 @@ function formatDiscordContent(event: ChannelOutboundEvent): string {
     ].join(" | ");
   }
 
-  return [
+  const parts = [
     `Lumo ${event.severity.toUpperCase()} supervisor alert`,
     `task=${event.taskId}`,
     `action=${event.decision.action}`,
     `reason=${event.decision.reason}`,
     event.decision.suggestion ? `suggestion=${event.decision.suggestion}` : undefined,
-  ]
+  ];
+
+  if (event.report?.bottleneck) {
+    parts.push(`bottleneck=${event.report.bottleneck.kind}`);
+  }
+
+  const browserUrl = event.report?.browserState?.url ?? event.report?.evidence.url;
+  if (browserUrl) {
+    parts.push(`url=${browserUrl}`);
+  }
+
+  const screenshot = event.report?.browserState?.screenshotRef?.url
+    ?? event.report?.evidence.screenshotRef?.url
+    ?? event.report?.browserState?.screenshotRef?.path
+    ?? event.report?.evidence.screenshotRef?.path;
+  if (screenshot) {
+    parts.push(`screenshot=${screenshot}`);
+  }
+
+  return parts
     .filter((part): part is string => Boolean(part))
     .join(" | ");
 }

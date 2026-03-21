@@ -1,6 +1,7 @@
 import { type ToolExecutionRecord } from "../domain/task.js";
 import { type SessionManager } from "../runtime/session-manager.js";
 import { type SupervisorDecision } from "../supervisor/decision.js";
+import { type SupervisorEscalationReport } from "../supervisor/escalation-report.js";
 import { type ChannelAdapter } from "./adapter.js";
 import { executeIntentEnvelope } from "./intent-executor.js";
 import { IntentResolverPipeline, type IntentResolver } from "./intent-resolver.js";
@@ -67,6 +68,7 @@ export class ConversationRouter {
       const envelope = await this.intentResolver.resolve(message.text, {
         hasActiveTask: Boolean(this.options.sessionManager.current),
         currentTaskId: this.options.sessionManager.current?.runtime.task.task.taskId ?? null,
+        currentTaskStatus: this.options.sessionManager.current?.runtime.task.task.status ?? null,
       });
       const reply = await executeIntentEnvelope(envelope, {
         sessionManager: this.options.sessionManager,
@@ -99,7 +101,10 @@ export class ConversationRouter {
     });
   }
 
-  async emitSupervisorAlert(decision: SupervisorDecision): Promise<void> {
+  async emitSupervisorAlert(
+    decision: SupervisorDecision,
+    report?: SupervisorEscalationReport,
+  ): Promise<void> {
     const current = this.options.sessionManager.current;
     if (!current || !this.currentTarget) {
       return;
@@ -116,6 +121,7 @@ export class ConversationRouter {
       taskId: current.runtime.task.task.taskId,
       severity: decision.status,
       decision,
+      report,
     });
   }
 
@@ -148,6 +154,7 @@ export class ConversationRouter {
     taskId: string;
     severity: "warning" | "critical";
     decision: SupervisorDecision;
+    report?: SupervisorEscalationReport;
   }): Promise<void> {
     const adapter = this.options.adapters.find((candidate) => candidate.name === event.target.adapter);
     if (!adapter) {

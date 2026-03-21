@@ -10,6 +10,8 @@ export async function executeIntentEnvelope(
   envelope: IntentEnvelope,
   options: ExecuteIntentOptions,
 ): Promise<string> {
+  const currentStatus = options.sessionManager.current?.runtime.task.task.status;
+
   if (envelope.intent === "clarify") {
     return envelope.reason || "I need a clearer instruction.";
   }
@@ -39,6 +41,11 @@ export async function executeIntentEnvelope(
   assertTaskRef(options.sessionManager, envelope.task_ref);
 
   if (envelope.intent === "followup") {
+    if (currentStatus === "halted") {
+      await options.sessionManager.resume(envelope.instruction);
+      return "Resumed the halted task with your recovery guidance.";
+    }
+
     await options.sessionManager.followUp(envelope.instruction);
     return "Queued follow-up instruction.";
   }
