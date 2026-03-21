@@ -19,7 +19,6 @@ export function createSampleTaskSnapshot(): UiTaskSnapshot {
         taskId: "task-001",
         actor: {
           id: "actor-001",
-          model: "claude-opus-4",
           systemPrompt: "default",
           tools: ["bash", "agent-browser", "coding-agent"],
         },

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface ResolvedBinary {
   candidate: string;
@@ -73,4 +74,54 @@ function findExecutablePath(
 
 function defaultIsExecutable(path: string): boolean {
   return existsSync(path);
+}
+
+
+export function resolveBinaryCommandFromModule(
+  candidates: readonly string[],
+  moduleUrl: string,
+  options: BinaryResolverOptions & { maxDepth?: number } = {},
+): ResolvedBinary | undefined {
+  const scopedCandidates = buildModuleBinaryCandidates(candidates, moduleUrl, options.maxDepth ?? 6);
+  return resolveBinaryCommand(scopedCandidates, {
+    ...options,
+    cwd: undefined,
+  });
+}
+
+export function buildModuleBinaryCandidates(
+  candidates: readonly string[],
+  moduleUrl: string,
+  maxDepth = 6,
+): string[] {
+  const moduleDir = dirname(fileURLToPath(moduleUrl));
+  const searchRoots = collectAncestorDirectories(moduleDir, maxDepth);
+  const scopedCandidates: string[] = [];
+
+  for (const root of searchRoots) {
+    for (const candidate of candidates) {
+      if (candidate.trim().length === 0) {
+        continue;
+      }
+      scopedCandidates.push(join(root, "node_modules", ".bin", candidate));
+    }
+  }
+
+  return scopedCandidates;
+}
+
+function collectAncestorDirectories(start: string, maxDepth: number): string[] {
+  const directories: string[] = [];
+  let current = start;
+
+  for (let depth = 0; depth <= maxDepth; depth += 1) {
+    directories.push(current);
+    const parent = dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+
+  return directories;
 }

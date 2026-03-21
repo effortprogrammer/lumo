@@ -1,30 +1,47 @@
-import { InProcessA2AAdapter } from "../a2a/in-process-adapter.js";
+import {
+  type A2AAgentAdapter,
+  type A2AEnvelope,
+  type A2AMessage,
+  buildActorProgressMessage,
+  type CancelTaskRequest,
+} from "../a2a/protocol.js";
+import { createActorTransport, type SupervisorTransport } from "../a2a/transport.js";
 import { createAlertDispatcher } from "../alerts/create-dispatcher.js";
 import { type LumoConfig } from "../config/load-config.js";
 import {
   type ConversationTurn,
+  type RuntimeAnomaly,
   type SupervisorProfile,
   type TaskPairing,
   type TaskStatus,
   type ToolExecutionRecord,
 } from "../domain/task.js";
+import { LogBatcher, type LogBatch } from "../logging/log-batcher.js";
 import { type SupervisorDecision } from "../supervisor/decision.js";
+import { assessBottleneck, type BottleneckAssessment } from "../supervisor/bottleneck.js";
+import { type SupervisorOutputEnvelope } from "../supervisor/contracts.js";
 import {
-  HeuristicSupervisorClient,
-  MockSupervisorClient,
-  OpenAICompatibleSupervisorClient,
+  HeuristicRuntimeAnomalyDetector,
+  type RuntimeAnomalyDetector,
+  type RuntimeAnomalyDetectorContext,
+} from "./anomaly-detector.js";
+import { enrichBrowserSituation } from "./browser-situation.js";
+import {
+  createConfiguredSupervisorClient,
   type SupervisorModelClient,
 } from "../supervisor/model-client.js";
 import { SupervisorPipeline } from "../supervisor/pipeline.js";
-import { ActorRuntime } from "./actor-runtime.js";
+import { createDefaultPiMonoRuntimeClient } from "./pi-rpc-runtime-client.js";
 import { type CommandRunner, SubprocessCommandRunner } from "./subprocess.js";
+import { createTaskPairRuntimeState, type TaskPairRuntimeState } from "./task-pair-state.js";
 
-export type RuntimeProvider = "pi-mono";
+export type RuntimeProvider = "pi";
 
 export interface RuntimeSession {
   sessionId: string;
-  provider: RuntimeProvider | "legacy";
+  provider: RuntimeProvider;
   task: TaskPairing;
+  pairState: TaskPairRuntimeState;
   actorLogs: ToolExecutionRecord[];
 }
 
@@ -45,9 +62,24 @@ export type RuntimeSessionEvent =
     decision: SupervisorDecision;
   }
   | {
+    type: "supervisor-output";
+    sessionId: string;
+    output: SupervisorOutputEnvelope;
+  }
+  | {
+    type: "supervisor-progress";
+    sessionId: string;
+    progress: ReturnType<typeof buildActorProgressMessage>;
+  }
+  | {
     type: "conversation";
     sessionId: string;
     turn: ConversationTurn;
+  }
+  | {
+    type: "anomaly";
+    sessionId: string;
+    anomaly: RuntimeAnomaly;
   };
 
 export interface RuntimeSessionCreateOptions {
@@ -67,149 +99,35 @@ export interface RuntimeSessionAdapter {
   ): () => void;
 }
 
-interface LegacyRuntimeAdapterOptions {
-  config: LumoConfig;
-  runner?: CommandRunner;
-  now?: () => string;
-}
-
-interface LegacyRuntimeSessionRecord {
-  runtime: ActorRuntime;
-  session: RuntimeSession;
-  listeners: Set<(event: RuntimeSessionEvent) => void>;
-}
-
-export class LegacyRuntimeAdapter implements RuntimeSessionAdapter {
-  private readonly runner: CommandRunner;
-  private readonly now: () => string;
-  private readonly sessions = new Map<string, LegacyRuntimeSessionRecord>();
-
-  constructor(private readonly options: LegacyRuntimeAdapterOptions) {
-    this.runner = options.runner ?? new SubprocessCommandRunner();
-    this.now = options.now ?? (() => new Date().toISOString());
-  }
-
-  createSession(options: RuntimeSessionCreateOptions): RuntimeSession {
-    const sessionId = `legacy-${Date.now()}`;
-    const adapter = new InProcessA2AAdapter();
-    const task = createTaskPairing(this.options.config, this.now, options.instruction);
-    const listeners = new Set<(event: RuntimeSessionEvent) => void>();
-    const session: RuntimeSession = {
-      sessionId,
-      provider: "legacy",
-      task,
-      actorLogs: [],
-    };
-    const supervisor = new SupervisorPipeline({
-      adapter,
-      actorAgentId: task.task.actor.id,
-      supervisorAgentId: task.task.supervisor.id,
-      client: createSupervisorClient(this.options.config),
-      alerts: createAlertDispatcher(this.options.config),
-      now: this.now,
-      onDecision: (decision) => {
-        this.emit(listeners, {
-          type: "decision",
-          sessionId,
-          decision,
-        });
-      },
-    });
-    const runtime = new ActorRuntime({
-      pairing: task,
-      config: this.options.config,
-      adapter,
-      runner: this.runner,
-      now: this.now,
-      cwd: options.cwd ?? process.cwd(),
-      onLog: (record) => {
-        session.actorLogs.push(record);
-        this.emit(listeners, {
-          type: "log",
-          sessionId,
-          record,
-        });
-      },
-      onStatusChange: (status) => {
-        this.emit(listeners, {
-          type: "status",
-          sessionId,
-          status,
-        });
-      },
-      onConversation: (turn) => {
-        this.emit(listeners, {
-          type: "conversation",
-          sessionId,
-          turn,
-        });
-      },
-      onBatch: async (batch) => {
-        await supervisor.consume(batch);
-      },
-    });
-
-    this.sessions.set(sessionId, {
-      runtime,
-      session,
-      listeners,
-    });
-
-    return session;
-  }
-
-  async sendInput(sessionId: string, text: string): Promise<void> {
-    await this.getRecord(sessionId).runtime.executeInstruction(text);
-  }
-
-  async pause(sessionId: string, reason?: string): Promise<void> {
-    this.getRecord(sessionId).runtime.pause(reason);
-  }
-
-  async resume(sessionId: string, text?: string): Promise<void> {
-    await this.getRecord(sessionId).runtime.resume(text);
-  }
-
-  async halt(sessionId: string, reason: string): Promise<void> {
-    this.getRecord(sessionId).runtime.halt(reason);
-  }
-
-  subscribe(
-    sessionId: string,
-    listener: (event: RuntimeSessionEvent) => void,
-  ): () => void {
-    const record = this.getRecord(sessionId);
-    record.listeners.add(listener);
-    return () => {
-      record.listeners.delete(listener);
-    };
-  }
-
-  private getRecord(sessionId: string): LegacyRuntimeSessionRecord {
-    const record = this.sessions.get(sessionId);
-    if (!record) {
-      throw new Error(`Unknown runtime session ${sessionId}`);
-    }
-    return record;
-  }
-
-  private emit(
-    listeners: Set<(event: RuntimeSessionEvent) => void>,
-    event: RuntimeSessionEvent,
-  ): void {
-    for (const listener of listeners) {
-      listener(event);
-    }
-  }
-}
-
 export interface PiMonoRuntimeClient {
   isAvailable(): boolean;
   createSession(options: { sessionId: string; instruction: string }): { externalSessionId: string };
-  sendInput(externalSessionId: string, text: string): Promise<void>;
+  sendInput(
+    externalSessionId: string,
+    text: string,
+    options?: {
+      role?: ConversationTurn["role"];
+      deliverAs?: "auto" | "prompt" | "steer" | "follow_up";
+      echoConversation?: boolean;
+    },
+  ): Promise<void>;
   pause(externalSessionId: string, reason?: string): Promise<void>;
-  resume(externalSessionId: string, text?: string): Promise<void>;
-  halt(externalSessionId: string, reason: string): Promise<void>;
+  resume(
+    externalSessionId: string,
+    text?: string,
+    options?: {
+      role?: ConversationTurn["role"];
+      echoConversation?: boolean;
+    },
+  ): Promise<void>;
+  halt(
+    externalSessionId: string,
+    reason: string,
+    options?: {
+      role?: ConversationTurn["role"];
+      echoConversation?: boolean;
+    },
+  ): Promise<void>;
   subscribe(
     externalSessionId: string,
     listener: (event: PiMonoRuntimeEvent) => void,
@@ -237,6 +155,14 @@ export type PiMonoRuntimeEvent =
     output: ToolExecutionRecord["output"];
     durationMs: number;
     exitCode?: number | null;
+    metadata?: Record<string, unknown>;
+    screenshotRef?: ToolExecutionRecord["screenshotRef"];
+  }
+  | {
+    type: "runtime.anomaly";
+    taskId: string;
+    occurredAt: string;
+    anomaly: RuntimeAnomaly;
   }
   | {
     type: "supervisor.decision";
@@ -254,6 +180,8 @@ interface PiMonoSessionAdapterOptions {
   config: LumoConfig;
   client?: PiMonoRuntimeClient;
   now?: () => string;
+  supervisorTransport?: SupervisorTransport;
+  enableLocalSupervisor?: boolean;
 }
 
 interface PiMonoSessionRecord {
@@ -261,6 +189,20 @@ interface PiMonoSessionRecord {
   externalSessionId: string;
   listeners: Set<(event: RuntimeSessionEvent) => void>;
   unsubscribeClient?: () => void;
+  batcher: LogBatcher;
+  supervisor: SupervisorPipeline;
+  runtimeBus: PiSupervisorRuntimeAdapter;
+  supervisorTransport?: SupervisorTransport;
+  supervisionInterval?: ReturnType<typeof setInterval>;
+  anomalyDetector: RuntimeAnomalyDetector;
+  recentAnomalyKeys: Map<string, string>;
+  lastToolProgressAt?: string;
+  progressSequence: number;
+  recoveryState: {
+    fingerprint?: string;
+    attempts: number;
+    phase: "idle" | "recovering" | "escalated";
+  };
 }
 
 class UnavailablePiMonoRuntimeClient implements PiMonoRuntimeClient {
@@ -269,23 +211,23 @@ class UnavailablePiMonoRuntimeClient implements PiMonoRuntimeClient {
   }
 
   createSession(): { externalSessionId: string } {
-    throw new Error("pi-mono runtime client is unavailable");
+      throw new Error("pi runtime client is unavailable");
   }
 
   async sendInput(): Promise<void> {
-    throw new Error("pi-mono runtime client is unavailable");
+      throw new Error("pi runtime client is unavailable");
   }
 
   async pause(): Promise<void> {
-    throw new Error("pi-mono runtime client is unavailable");
+      throw new Error("pi runtime client is unavailable");
   }
 
   async resume(): Promise<void> {
-    throw new Error("pi-mono runtime client is unavailable");
+      throw new Error("pi runtime client is unavailable");
   }
 
   async halt(): Promise<void> {
-    throw new Error("pi-mono runtime client is unavailable");
+      throw new Error("pi runtime client is unavailable");
   }
 
   subscribe(): () => void {
@@ -300,7 +242,12 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
 
   constructor(private readonly options: PiMonoSessionAdapterOptions) {
     this.now = options.now ?? (() => new Date().toISOString());
-    this.client = options.client ?? new UnavailablePiMonoRuntimeClient();
+    this.client = options.client ?? createDefaultPiMonoRuntimeClient({
+      cwd: process.cwd(),
+      tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+      appendSystemPrompt: buildPiBrowserExecutionPolicyPrompt(options.config.actor.systemPrompt),
+      now: this.now,
+    });
   }
 
   isAvailable(): boolean {
@@ -309,68 +256,143 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
 
   createSession(options: RuntimeSessionCreateOptions): RuntimeSession {
     if (!this.isAvailable()) {
-      throw new Error("pi-mono runtime is not available");
+      throw new Error("pi runtime is not available");
     }
 
-    const sessionId = `pi-mono-${Date.now()}`;
+    const sessionId = `pi-${Date.now()}`;
     const session: RuntimeSession = {
       sessionId,
-      provider: "pi-mono",
+      provider: "pi",
       task: createTaskPairing(this.options.config, this.now, options.instruction),
+      pairState: createTaskPairRuntimeState({
+        sessionId,
+        taskId: `task-${Date.now()}`,
+        actorAgentId: "pending-actor",
+        supervisorAgentId: "pending-supervisor",
+        status: "pending",
+        currentStep: 0,
+      }),
       actorLogs: [],
     };
+    session.pairState = createTaskPairRuntimeState({
+      sessionId,
+      taskId: session.task.task.taskId,
+      actorAgentId: session.task.task.actor.id,
+      supervisorAgentId: session.task.task.supervisor.id,
+      status: session.task.task.status,
+      currentStep: session.task.task.currentStep,
+    });
 
-    // TODO: Replace the mock client contract with the real pi-mono SDK/session broker.
+  // TODO: Replace the mock client contract with the real pi SDK/session broker.
     const created = this.client.createSession({
       sessionId,
       instruction: options.instruction,
     });
 
     const listeners = new Set<(event: RuntimeSessionEvent) => void>();
-    const unsubscribeClient = this.client.subscribe(
-      created.externalSessionId,
-      (event) => {
-        const mappedEvents = mapPiMonoEventToLumoSessionEvents(event, session);
-        for (const mappedEvent of mappedEvents) {
-          if (mappedEvent.type === "log") {
-            session.actorLogs.push(mappedEvent.record);
-          }
-          this.emit(listeners, mappedEvent);
-        }
+    const runtimeBus = new PiSupervisorRuntimeAdapter({
+      client: this.client,
+      externalSessionId: created.externalSessionId,
+      now: this.now,
+      isInterventionAllowed: () => !isTerminalTaskStatus(session.task.task.status),
+      onFeedbackInjected: () => {
+        record.recoveryState.attempts += 1;
+        record.recoveryState.phase = "recovering";
       },
-    );
+      onEscalated: () => {
+        record.recoveryState.phase = "escalated";
+      },
+    });
+    const supervisor = new SupervisorPipeline({
+      actorTransport: createActorTransport(runtimeBus),
+      actorAgentId: session.task.task.actor.id,
+      supervisorAgentId: session.task.task.supervisor.id,
+      client: createSupervisorClient(this.options.config),
+      alerts: createAlertDispatcher(this.options.config),
+      now: this.now,
+      onDecision: (decision) => {
+        this.emitMappedPiEvent(record, {
+          type: "supervisor.decision",
+          taskId: created.externalSessionId,
+          occurredAt: this.now(),
+          decision,
+        });
+      },
+      onOutput: (output) => {
+        record.session.pairState.supervisor.lastOutput = output;
+        record.session.pairState.supervisor.lastEvaluatedAt = this.now();
+        this.emit(record.listeners, {
+          type: "supervisor-output",
+          sessionId: record.session.sessionId,
+          output,
+        });
+      },
+    });
+    const batcher = new LogBatcher(session.task.context, {
+      maxSteps: this.options.config.batch.maxSteps,
+      maxAgeMs: this.options.config.batch.maxAgeMs,
+      immediateKeywords: this.options.config.batch.immediateKeywords,
+    });
 
-    this.sessions.set(sessionId, {
+    const record: PiMonoSessionRecord = {
       session,
       externalSessionId: created.externalSessionId,
       listeners,
-      unsubscribeClient,
-    });
+      batcher,
+      supervisor,
+      runtimeBus,
+      supervisorTransport: this.options.supervisorTransport,
+      anomalyDetector: new HeuristicRuntimeAnomalyDetector({
+        noProgressMs: Math.max(this.options.config.batch.maxAgeMs * 2, 5_000),
+      }),
+      recentAnomalyKeys: new Map(),
+      recoveryState: {
+        attempts: 0,
+        phase: "idle",
+      },
+      progressSequence: 0,
+    };
+
+    record.unsubscribeClient = this.client.subscribe(
+      created.externalSessionId,
+      (event) => {
+        this.emitMappedPiEvent(record, event);
+      },
+    );
+    record.supervisionInterval = setInterval(() => {
+      this.detectAndQueueAnomalies(record);
+      const batch = record.batcher.flushIfDue();
+      if (batch) {
+        void this.consumeSupervisorBatch(record, batch);
+      }
+    }, 1_000);
+    record.supervisionInterval.unref?.();
+
+    this.sessions.set(sessionId, record);
 
     return session;
   }
 
   async sendInput(sessionId: string, text: string): Promise<void> {
     const record = this.getRecord(sessionId);
-    // TODO: Route input into the real pi-mono runtime session once integrated.
+  // TODO: Route input into the real pi runtime session once integrated.
     await this.client.sendInput(record.externalSessionId, text);
   }
 
   async pause(sessionId: string, reason?: string): Promise<void> {
     const record = this.getRecord(sessionId);
-    // TODO: Map pause semantics to pi-mono checkpointing/backpressure behavior.
+  // TODO: Map pause semantics to pi checkpointing/backpressure behavior.
     await this.client.pause(record.externalSessionId, reason);
   }
 
   async resume(sessionId: string, text?: string): Promise<void> {
     const record = this.getRecord(sessionId);
-    // TODO: Route resume semantics to pi-mono continuation APIs.
+  // TODO: Route resume semantics to pi continuation APIs.
     await this.client.resume(record.externalSessionId, text);
   }
 
   async halt(sessionId: string, reason: string): Promise<void> {
     const record = this.getRecord(sessionId);
-    // TODO: Wire halt into pi-mono cancellation/termination when the runtime is available.
     await this.client.halt(record.externalSessionId, reason);
   }
 
@@ -401,6 +423,484 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
       listener(event);
     }
   }
+
+  private emitMappedPiEvent(
+    record: PiMonoSessionRecord,
+    event: PiMonoRuntimeEvent,
+  ): void {
+    const mappedEvents = mapPiMonoEventToLumoSessionEvents(event, record.session);
+    for (const mappedEvent of mappedEvents) {
+      if (mappedEvent.type === "log") {
+        record.session.actorLogs.push(mappedEvent.record);
+        record.lastToolProgressAt = mappedEvent.record.timestamp;
+        this.publishSupervisorProgress(record, {
+          summary: `${mappedEvent.record.tool} ${mappedEvent.record.input}`.trim(),
+        });
+        const batch = record.batcher.add(mappedEvent.record);
+        if (batch) {
+          void this.consumeSupervisorBatch(record, batch);
+        }
+        this.detectAndQueueAnomalies(record);
+      }
+      if (mappedEvent.type === "anomaly") {
+        this.publishSupervisorProgress(record, {
+          anomalies: [mappedEvent.anomaly],
+          summary: mappedEvent.anomaly.message,
+        });
+        record.batcher.queueAnomalies([mappedEvent.anomaly]);
+        const anomalyBatch = record.batcher.flush("anomaly");
+        if (anomalyBatch) {
+          void this.consumeSupervisorBatch(record, anomalyBatch);
+        }
+      }
+      this.emit(record.listeners, mappedEvent);
+    }
+
+    if (event.type === "session.status") {
+      this.publishSupervisorProgress(record, {
+        summary: `status=${event.status}`,
+      });
+    }
+
+    if (event.type === "session.status" && isTerminalTaskStatus(event.status)) {
+      const trailingBatch = record.batcher.flush("manual");
+      if (trailingBatch) {
+        void this.consumeSupervisorBatch(record, trailingBatch);
+      }
+      this.stopSupervision(record);
+    }
+  }
+
+  private publishSupervisorProgress(
+    record: PiMonoSessionRecord,
+    options: {
+      summary?: string;
+      anomalies?: RuntimeAnomaly[];
+    } = {},
+  ): void {
+    record.progressSequence += 1;
+    const collectionState = inferCollectionState(record.session.actorLogs);
+    const progress = buildActorProgressMessage({
+      progressId: `progress-${record.session.sessionId}-${record.progressSequence}`,
+      actorSessionId: record.session.sessionId,
+      sequence: record.progressSequence,
+      taskPattern: collectionState ? "multi_item_collection" : undefined,
+      collectionState: collectionState ?? undefined,
+      currentStatus: record.session.task.task.status,
+      currentStep: record.session.task.task.currentStep,
+      summary: options.summary,
+      anomalies: options.anomalies,
+    });
+    record.session.pairState.supervisor.lastProgress = progress;
+    if (record.supervisorTransport) {
+      void record.supervisorTransport.sendProgress({
+        id: progress.progressId,
+        from: record.session.task.task.actor.id,
+        to: record.session.task.task.supervisor.id,
+        pairId: record.session.pairState.pairId,
+        taskId: record.session.task.task.taskId,
+        sessionId: record.session.sessionId,
+        correlationId: progress.progressId,
+        sentAt: this.now(),
+        payload: {
+          id: `progress-${record.session.sessionId}-${Date.now()}`,
+          taskId: record.session.task.task.taskId,
+          role: "assistant",
+          parts: [
+            {
+              kind: "json",
+              data: progress,
+            },
+          ],
+          sentAt: this.now(),
+        },
+      }).catch(() => {});
+    }
+    this.emit(record.listeners, {
+      type: "supervisor-progress",
+      sessionId: record.session.sessionId,
+      progress,
+    });
+  }
+
+  private async consumeSupervisorBatch(
+    record: PiMonoSessionRecord,
+    batch: LogBatch,
+  ): Promise<void> {
+    try {
+      const enrichedBatch = enrichBrowserSituation({
+        ...batch,
+        recentLogs: record.session.actorLogs.slice(-20),
+      }, this.now());
+      const bottleneck = assessBottleneck({
+        anomalies: enrichedBatch.anomalies,
+        browserProgress: enrichedBatch.browserProgress,
+        browserState: enrichedBatch.browserState,
+        recentLogs: enrichedBatch.recentLogs ?? enrichedBatch.batch,
+        taskInstruction: enrichedBatch.taskInstruction,
+      });
+      record.runtimeBus.setRecoveryContext(
+        this.normalizeRecoveryContext(record, bottleneck, enrichedBatch),
+      );
+      if (this.options.enableLocalSupervisor === false) {
+        return;
+      }
+      await record.supervisor.consume(enrichedBatch);
+    } catch (error) {
+      this.emit(record.listeners, {
+        type: "conversation",
+        sessionId: record.session.sessionId,
+        turn: {
+          id: `turn-${Date.now()}`,
+          role: "system",
+          text: `Supervisor pipeline error: ${error instanceof Error ? error.message : String(error)}`,
+          timestamp: this.now(),
+        },
+      });
+    }
+  }
+
+  private stopSupervision(record: PiMonoSessionRecord): void {
+    if (record.supervisionInterval) {
+      clearInterval(record.supervisionInterval);
+      record.supervisionInterval = undefined;
+    }
+    record.unsubscribeClient?.();
+    record.unsubscribeClient = undefined;
+  }
+
+  private detectAndQueueAnomalies(record: PiMonoSessionRecord): void {
+    const anomalies = record.anomalyDetector.detect(this.buildAnomalyContext(record))
+      .filter((anomaly) => this.shouldEmitAnomaly(record, anomaly));
+    if (anomalies.length === 0) {
+      return;
+    }
+
+    record.batcher.queueAnomalies(anomalies);
+    for (const anomaly of anomalies) {
+      this.emit(record.listeners, {
+        type: "anomaly",
+        sessionId: record.session.sessionId,
+        anomaly,
+      });
+    }
+
+    const anomalyBatch = record.batcher.flush("anomaly");
+    if (anomalyBatch) {
+      void this.consumeSupervisorBatch(record, anomalyBatch);
+    }
+  }
+
+  private buildAnomalyContext(record: PiMonoSessionRecord): RuntimeAnomalyDetectorContext {
+    const recentLogs = record.session.actorLogs.slice(-10);
+    const latestLog = recentLogs.at(-1);
+    return {
+      now: this.now(),
+      snapshot: {
+        taskId: record.session.task.task.taskId,
+        sessionId: record.session.sessionId,
+        currentStep: record.session.task.task.currentStep,
+        status: record.session.task.task.status,
+        lastUpdatedAt: record.session.task.task.lastUpdatedAt,
+        lastToolProgressAt: record.lastToolProgressAt,
+        latestTool: latestLog?.tool,
+        latestInput: latestLog?.input,
+      },
+      recentLogs,
+      recentConversation: record.session.task.context.conversationHistory.slice(-10),
+    };
+  }
+
+  private shouldEmitAnomaly(record: PiMonoSessionRecord, anomaly: RuntimeAnomaly): boolean {
+    const key = buildAnomalyKey(anomaly);
+    const lastOccurredAt = record.recentAnomalyKeys.get(key);
+    if (lastOccurredAt === anomaly.occurredAt) {
+      return false;
+    }
+
+    const cooldownMs = anomaly.kind === "no_progress" ? 30_000 : 5_000;
+    if (lastOccurredAt) {
+      const ageMs = Date.parse(anomaly.occurredAt) - Date.parse(lastOccurredAt);
+      if (Number.isFinite(ageMs) && ageMs < cooldownMs) {
+        return false;
+      }
+    }
+
+    record.recentAnomalyKeys.set(key, anomaly.occurredAt);
+    return true;
+  }
+
+  private normalizeRecoveryContext(
+    record: PiMonoSessionRecord,
+    bottleneck: BottleneckAssessment | undefined,
+    batch: LogBatch,
+  ): {
+    bottleneck?: BottleneckAssessment;
+    fingerprint?: string;
+    stateSignature?: string;
+  } {
+    if (!bottleneck) {
+      record.recoveryState = {
+        attempts: 0,
+        phase: "idle",
+      };
+      return {};
+    }
+
+    const fingerprint = [
+      bottleneck.kind,
+      bottleneck.recoveryPlan.action,
+      bottleneck.recoveryPlan.instructions.join("|"),
+    ].join("|");
+    const stateSignature = [
+      batch.browserState?.url ?? "",
+      batch.browserState?.title ?? "",
+      batch.browserState?.pageKind ?? "",
+    ].join("|");
+
+    if (record.recoveryState.fingerprint !== fingerprint) {
+      record.recoveryState = {
+        fingerprint,
+        attempts: 0,
+        phase: "idle",
+      };
+    }
+
+    const maxAttempts = bottleneck.recoveryPlan.maxAttempts ?? 1;
+    if (record.recoveryState.attempts >= maxAttempts) {
+      const escalated = {
+        ...bottleneck,
+        kind: "human_decision_required" as const,
+        severity: "critical" as const,
+        confidence: Math.max(bottleneck.confidence, 0.9),
+        summary: `Automatic recovery is exhausted for ${bottleneck.kind}. Human guidance is required.`,
+        diagnosis: `The actor already attempted the recovery plan for ${bottleneck.kind} without resolving the bottleneck.`,
+        recoveryPlan: {
+          action: "halt_and_escalate" as const,
+          summary: "Pause automated recovery and ask the human operator how to proceed.",
+          instructions: [
+            "Stop automatic recovery attempts for this bottleneck.",
+            "Report the unresolved state to the operator.",
+            "Resume only after human guidance is provided.",
+          ],
+          humanEscalationNeeded: true,
+          maxAttempts: 1,
+        },
+        recoverable: false,
+      };
+      record.recoveryState.phase = "escalated";
+      return {
+        bottleneck: escalated,
+        fingerprint,
+        stateSignature,
+      };
+    }
+
+    return {
+      bottleneck,
+      fingerprint,
+      stateSignature,
+    };
+  }
+}
+
+function inferCollectionState(
+  actorLogs: ToolExecutionRecord[],
+): {
+  itemsCollected: number;
+  distinctItems: number;
+  fieldsSeen: string[];
+  comparisonReady?: boolean;
+  recommendationReady?: boolean;
+} | null {
+  const text = actorLogs
+    .map((record) => `${record.input}\n${typeof record.output === "string" ? record.output : JSON.stringify(record.output)}`)
+    .join("\n");
+  const matches = [
+    ...text.matchAll(/([가-힣A-Za-z0-9()\/\-\s]{4,80})\s*\n?\s*(?:상품금액\s*)?(\d{1,3}(?:,\d{3})+)\s*원/g),
+  ];
+  if (matches.length === 0) {
+    return null;
+  }
+
+  const distinct = new Set(matches.map((match) => `${match[1]?.trim()}|${match[2]}`));
+  return {
+    itemsCollected: matches.length,
+    distinctItems: distinct.size,
+    fieldsSeen: ["name", "price"],
+    comparisonReady: distinct.size >= 3,
+    recommendationReady: distinct.size >= 5,
+  };
+}
+
+class PiSupervisorRuntimeAdapter implements A2AAgentAdapter {
+  private recoveryContext?: {
+    bottleneck?: BottleneckAssessment;
+    fingerprint?: string;
+    stateSignature?: string;
+  };
+  private lastFeedbackFingerprint?: string;
+  private lastFeedbackAt?: string;
+  private recoveryPhase: "normal" | "recovering" | "awaiting-human" = "normal";
+
+  constructor(
+    private readonly options: {
+      client: PiMonoRuntimeClient;
+      externalSessionId: string;
+      now: () => string;
+      isInterventionAllowed: () => boolean;
+      onFeedbackInjected: () => void;
+      onEscalated: () => void;
+    },
+  ) {}
+
+  setRecoveryContext(
+    recoveryContext: {
+      bottleneck?: BottleneckAssessment;
+      fingerprint?: string;
+      stateSignature?: string;
+    },
+  ): void {
+    if (!recoveryContext.bottleneck) {
+      this.recoveryContext = undefined;
+      this.recoveryPhase = "normal";
+      this.lastFeedbackFingerprint = undefined;
+      this.lastFeedbackAt = undefined;
+      return;
+    }
+    const { bottleneck, fingerprint, stateSignature } = recoveryContext;
+
+    if (this.recoveryContext?.stateSignature !== stateSignature) {
+      this.lastFeedbackFingerprint = undefined;
+      this.lastFeedbackAt = undefined;
+      this.recoveryPhase = "normal";
+    }
+
+    this.recoveryContext = {
+      bottleneck,
+      fingerprint,
+      stateSignature,
+    };
+  }
+
+  async sendMessage(envelope: A2AEnvelope<A2AMessage>): Promise<void> {
+    if (!this.options.isInterventionAllowed()) {
+      return;
+    }
+
+    const text = envelope.payload.parts
+      .filter((part): part is { kind: "text"; text: string } => part.kind === "text")
+      .map((part) => part.text)
+      .join(" ")
+      .trim();
+
+    if (text.length === 0) {
+      return;
+    }
+
+    if (!this.shouldInjectFeedback()) {
+      return;
+    }
+
+    const bottleneck = this.recoveryContext?.bottleneck;
+    const deliverAs = shouldUseSteeringRecovery(bottleneck) ? "steer" : "follow_up";
+    const guidance = bottleneck
+      ? buildRecoveryGuidanceText(bottleneck, text)
+      : text;
+
+    await this.options.client.sendInput(this.options.externalSessionId, guidance, {
+      role: "supervisor",
+      deliverAs,
+    });
+    this.recoveryPhase = "recovering";
+    this.lastFeedbackFingerprint = this.recoveryContext?.fingerprint;
+    this.lastFeedbackAt = this.options.now();
+    this.options.onFeedbackInjected();
+  }
+
+  async cancelTask(envelope: A2AEnvelope<CancelTaskRequest>): Promise<void> {
+    if (!this.options.isInterventionAllowed()) {
+      return;
+    }
+
+    this.recoveryPhase = "awaiting-human";
+    this.options.onEscalated();
+    await this.options.client.halt(this.options.externalSessionId, envelope.payload.reason, {
+      role: "supervisor",
+    });
+  }
+
+  registerMessageHandler(): void {}
+
+  registerCancelHandler(): void {}
+
+  private shouldInjectFeedback(): boolean {
+    const fingerprint = this.recoveryContext?.fingerprint;
+    if (!fingerprint) {
+      return true;
+    }
+    if (this.recoveryPhase === "awaiting-human") {
+      return false;
+    }
+    if (this.lastFeedbackFingerprint !== fingerprint || !this.lastFeedbackAt) {
+      return true;
+    }
+
+    const cooldownMs = 20_000;
+    const ageMs = Date.parse(this.options.now()) - Date.parse(this.lastFeedbackAt);
+    return !Number.isFinite(ageMs) || ageMs >= cooldownMs;
+  }
+}
+
+function isTerminalTaskStatus(status: TaskStatus): boolean {
+  return status === "completed" || status === "halted" || status === "failed";
+}
+
+function buildPiBrowserExecutionPolicyPrompt(actorSystemPrompt: string): string {
+  return [
+    actorSystemPrompt,
+    "Browser work must go through the external agent-browser tool backed by the external agent-browser CLI.",
+    "When web browsing, searching, navigation, click, fill, snapshot, or extraction is needed, use the `agent-browser` tool with exact CLI-style commands such as `open <url>`, `get title`, `click <selector>`, `get text <selector>`, or `snapshot`.",
+    "Do not use bash for browser steps unless the user explicitly asks for shell scripting around browser output.",
+    "Do not use internal browser/web tools even if they appear available.",
+  ].join(" ");
+}
+
+function buildAnomalyKey(anomaly: RuntimeAnomaly): string {
+  return [
+    anomaly.kind,
+    anomaly.relatedTool ?? "",
+    anomaly.evidence?.repeatedInput ?? "",
+    anomaly.evidence?.childProcessName ?? "",
+  ].join("|");
+}
+
+function shouldUseSteeringRecovery(
+  bottleneck: BottleneckAssessment | undefined,
+): boolean {
+  if (!bottleneck) {
+    return false;
+  }
+
+  return bottleneck.recoveryPlan.action === "switch_to_extraction"
+    || bottleneck.recoveryPlan.action === "switch_to_synthesis";
+}
+
+function buildRecoveryGuidanceText(
+  bottleneck: BottleneckAssessment,
+  fallbackText: string,
+): string {
+  const controlPrefix = shouldUseSteeringRecovery(bottleneck)
+    ? "Priority override: stop broad browsing and switch to the next task phase now."
+    : "Recovery guidance:";
+  const instructionText = bottleneck.recoveryPlan.instructions.join(" ");
+  const summary = bottleneck.recoveryPlan.summary || bottleneck.summary;
+  return [
+    controlPrefix,
+    `Recovery goal: ${summary}.`,
+    `Diagnosis: ${bottleneck.diagnosis}.`,
+    instructionText || fallbackText,
+  ].join(" ");
 }
 
 export function mapPiMonoEventToLumoSessionEvents(
@@ -411,6 +911,7 @@ export function mapPiMonoEventToLumoSessionEvents(
     session.task.task.startedAt = event.startedAt;
     session.task.task.lastUpdatedAt = event.startedAt;
     session.task.task.status = "running";
+    session.pairState.actor.status = "running";
     return [{
       type: "status",
       sessionId: session.sessionId,
@@ -421,6 +922,7 @@ export function mapPiMonoEventToLumoSessionEvents(
   if (event.type === "session.status") {
     session.task.task.status = event.status;
     session.task.task.lastUpdatedAt = event.occurredAt;
+    session.pairState.actor.status = event.status;
     if (event.status === "halted") {
       session.task.task.haltedAt = event.occurredAt;
     }
@@ -437,6 +939,8 @@ export function mapPiMonoEventToLumoSessionEvents(
   if (event.type === "task.output") {
     session.task.task.currentStep += 1;
     session.task.task.lastUpdatedAt = event.occurredAt;
+    session.pairState.actor.currentStep = session.task.task.currentStep;
+    session.pairState.actor.lastOutputAt = event.occurredAt;
     return [{
       type: "log",
       sessionId: session.sessionId,
@@ -450,15 +954,29 @@ export function mapPiMonoEventToLumoSessionEvents(
         exitCode: event.exitCode,
         status: (event.exitCode ?? 0) === 0 ? "ok" : "error",
         metadata: {
-          runtimeProvider: "pi-mono",
+    runtimeProvider: "pi",
           sourceTaskId: event.taskId,
+          runtimeSessionId: session.sessionId,
+          ...event.metadata,
         },
+        screenshotRef: event.screenshotRef,
       },
+    }];
+  }
+
+  if (event.type === "runtime.anomaly") {
+    session.task.task.lastUpdatedAt = event.occurredAt;
+    return [{
+      type: "anomaly",
+      sessionId: session.sessionId,
+      anomaly: event.anomaly,
     }];
   }
 
   if (event.type === "supervisor.decision") {
     session.task.task.lastUpdatedAt = event.occurredAt;
+    session.pairState.supervisor.lastDecision = event.decision;
+    session.pairState.supervisor.lastEvaluatedAt = event.occurredAt;
     return [{
       type: "decision",
       sessionId: session.sessionId,
@@ -468,6 +986,9 @@ export function mapPiMonoEventToLumoSessionEvents(
 
   session.task.context.conversationHistory.push(event.turn);
   session.task.task.lastUpdatedAt = event.turn.timestamp;
+  if (event.turn.role === "human" || event.turn.role === "supervisor") {
+    session.pairState.actor.lastInputAt = event.turn.timestamp;
+  }
   return [{
     type: "conversation",
     sessionId: session.sessionId,
@@ -478,6 +999,8 @@ export function mapPiMonoEventToLumoSessionEvents(
 export interface RuntimeAdapterSelectionOptions {
   now?: () => string;
   piMonoClient?: PiMonoRuntimeClient;
+  supervisorTransport?: SupervisorTransport;
+  enableLocalSupervisor?: boolean;
   bootstrapRunner?: CommandRunner;
   healthCheck?: () => boolean;
   sleep?: (ms: number) => Promise<void>;
@@ -494,21 +1017,23 @@ export interface PiMonoBootstrapCommandAttempt {
 }
 
 const PI_MONO_STARTUP_FAILURE_MESSAGE =
-  "Pi-mono runtime health-check failed during startup. Ensure the installed pi toolchain is configured and reachable before launching Lumo.";
+  "Pi runtime health-check failed during startup. Ensure the installed pi toolchain is configured and reachable before launching Lumo.";
 
 export async function initializePiMonoRuntimeSessionAdapter(
   config: LumoConfig,
   options: RuntimeAdapterSelectionOptions = {},
 ): Promise<RuntimeSessionAdapter> {
-  if (config.runtime.provider !== "pi-mono") {
+  if (config.runtime.provider !== "pi") {
     throw new Error(
-      `Unsupported runtime.provider "${String(config.runtime.provider)}". Lumo requires "pi-mono".`,
+      `Unsupported runtime.provider "${String(config.runtime.provider)}". Lumo requires "pi".`,
     );
   }
   const piMono = new PiMonoSessionAdapter({
     config,
     client: options.piMonoClient,
     now: options.now,
+    supervisorTransport: options.supervisorTransport,
+    enableLocalSupervisor: options.enableLocalSupervisor,
   });
 
   const healthCheck = options.healthCheck ?? (() => piMono.isAvailable());
@@ -590,7 +1115,7 @@ function formatPiMonoBootstrapFailureMessage(
       .join("; ");
 
   return [
-    "Pi-mono runtime health-check failed during startup after runtime command checks.",
+    "Pi runtime health-check failed during startup after runtime command checks.",
     summary,
     "Set runtime.bootstrap.commands or LUMO_RUNTIME_BOOTSTRAP_COMMANDS to the correct runtime command list, or disable auto-bootstrap with runtime.bootstrap.enabled=false or LUMO_RUNTIME_AUTO_BOOTSTRAP=0.",
   ].join(" ");
@@ -622,14 +1147,13 @@ export function createTaskPairing(
   };
 
   return {
-    task: {
-      taskId,
-      actor: {
-        id: "actor",
-        model: config.actor.model,
-        systemPrompt: config.actor.systemPrompt,
-        tools: config.actor.tools,
-      },
+      task: {
+        taskId,
+        actor: {
+          id: "actor",
+          systemPrompt: config.actor.systemPrompt,
+          tools: config.actor.tools,
+        },
       supervisor: supervisorProfile,
       status: "pending",
       createdAt,
@@ -649,24 +1173,5 @@ export function createTaskPairing(
 }
 
 function createSupervisorClient(config: LumoConfig): SupervisorModelClient {
-  if (config.supervisor.client === "heuristic") {
-    return new HeuristicSupervisorClient();
-  }
-
-  if (config.supervisor.client === "openai-compatible") {
-    const openai = config.supervisor.openaiCompatible;
-    if (openai.enabled && openai.baseUrl && openai.apiKey && openai.model) {
-      return new OpenAICompatibleSupervisorClient({
-        baseUrl: openai.baseUrl,
-        apiKey: openai.apiKey,
-        model: openai.model,
-        systemPrompt: config.supervisor.systemPrompt,
-        timeoutMs: openai.timeoutMs,
-      });
-    }
-
-    return new HeuristicSupervisorClient();
-  }
-
-  return new MockSupervisorClient();
+  return createConfiguredSupervisorClient(config);
 }

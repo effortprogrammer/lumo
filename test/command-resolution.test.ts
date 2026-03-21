@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createDefaultConfig } from "../src/config/load-config.js";
-import { resolveBinaryCommand } from "../src/runtime/command-resolution.js";
+import { resolveBinaryCommand, resolveBinaryCommandFromModule } from "../src/runtime/command-resolution.js";
 
 describe("command resolution", () => {
   it("resolves the first available binary from PATH order", () => {
@@ -15,6 +15,18 @@ describe("command resolution", () => {
     assert.deepEqual(resolved, {
       candidate: "fallback-browser",
       path: "/opt/bin/fallback-browser",
+    });
+  });
+
+
+  it("resolves bundled binaries relative to the module location when cwd does not provide them", () => {
+    const resolved = resolveBinaryCommandFromModule(["pi"], "file:///opt/lumo/dist/src/runtime/pi-rpc-runtime-client.js", {
+      isExecutable: (path) => path === "/opt/lumo/node_modules/.bin/pi",
+    });
+
+    assert.deepEqual(resolved, {
+      candidate: "/opt/lumo/node_modules/.bin/pi",
+      path: "/opt/lumo/node_modules/.bin/pi",
     });
   });
 

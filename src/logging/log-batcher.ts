@@ -1,4 +1,7 @@
 import {
+  type BrowserProgressAssessment,
+  type BrowserStateSnapshot,
+  type RuntimeAnomaly,
   type TaskContext,
   type ToolExecutionRecord,
 } from "../domain/task.js";
@@ -14,13 +17,18 @@ export interface LogBatch {
   taskInstruction: string;
   conversationHistory: string[];
   batch: ToolExecutionRecord[];
-  triggeredBy: "steps" | "time" | "risk" | "manual";
+  recentLogs?: ToolExecutionRecord[];
+  anomalies: RuntimeAnomaly[];
+  browserState?: BrowserStateSnapshot;
+  browserProgress?: BrowserProgressAssessment;
+  triggeredBy: "steps" | "time" | "risk" | "manual" | "anomaly";
 }
 
 type BatchListener = (batch: LogBatch) => void;
 
 export class LogBatcher {
   private readonly pending: ToolExecutionRecord[] = [];
+  private readonly pendingAnomalies: RuntimeAnomaly[] = [];
   private readonly listeners = new Set<BatchListener>();
   private readonly now: () => number;
   private lastFlushAt: number;
@@ -49,7 +57,7 @@ export class LogBatcher {
   }
 
   flushIfDue(): LogBatch | null {
-    if (this.pending.length === 0) {
+    if (this.pending.length === 0 && this.pendingAnomalies.length === 0) {
       return null;
     }
 
@@ -61,7 +69,7 @@ export class LogBatcher {
   }
 
   flush(triggeredBy: LogBatch["triggeredBy"] = "manual"): LogBatch | null {
-    if (this.pending.length === 0) {
+    if (this.pending.length === 0 && this.pendingAnomalies.length === 0) {
       return null;
     }
 
@@ -69,6 +77,7 @@ export class LogBatcher {
       taskInstruction: this.context.instruction.text,
       conversationHistory: this.context.conversationHistory.map((turn) => turn.text),
       batch: this.pending.splice(0, this.pending.length),
+      anomalies: this.pendingAnomalies.splice(0, this.pendingAnomalies.length),
       triggeredBy,
     };
 
@@ -89,6 +98,10 @@ export class LogBatcher {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  queueAnomalies(anomalies: RuntimeAnomaly[]): void {
+    this.pendingAnomalies.push(...anomalies);
   }
 
   private decorateRisk(record: ToolExecutionRecord): ToolExecutionRecord {
