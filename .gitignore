@@ -3,3 +3,15 @@ dist/
 .env
 .DS_Store
 *.log
+
+# Local Lumo runtime state
+.lumo/
+.lumo-agentika/
+.omx/
+lumo.config.json
+
+# Local scratch artifacts
+coupang-error.png
+coupang-response.html
+overseas_travel_docs/
+scrape-coupang-*.mjs
