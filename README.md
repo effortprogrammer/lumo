@@ -1,26 +1,27 @@
 # Lumo
 
-Actor-Supervisor harness for monitored autonomous tasks.
+Lumo is a supervised runtime for autonomous tasks.
 
-## What it does
+It runs an actor, monitors it with a supervisor, and escalates when the task needs human attention.
 
-- Runs tasks through an **Actor** runtime (bash / browser / coding-agent paths)
-- Monitors execution with a **Supervisor**
-- Supports intervention outcomes:
-  - `ok` → continue
-  - `warning` → feedback injection
-  - `critical` → halt + alert
-- Uses unified natural-language intent routing (`start_task`, `followup`, `resume`, `halt`, `status`)
-- Supports channel integration (Discord gateway/webhook, Telegram inbound/outbound)
-- Runtime is **pi-mono only** (startup runs configured `pi` runtime checks, then fails if the pi-mono health-check still fails)
+## What Lumo does
+
+- Runs monitored tasks through an actor-supervisor loop
+- Injects feedback on warnings and halts on critical states
+- Sends escalation alerts to operators through Discord webhooks or the terminal
+- Accepts task input from local CLI and supported chat adapters
+- Supports browser-oriented and coding-agent execution paths through the `pi` runtime
 
 ## Requirements
 
 - Node.js 22+
 - npm
-- Installed `pi` toolchain available/reachable
+- An installed `pi` CLI available on `PATH`
+- A configured model provider for the runtime you want to use
 
 ## Install
+
+For a local checkout:
 
 ```bash
 git clone https://github.com/effortprogrammer/lumo.git
@@ -30,96 +31,113 @@ npm run build
 npm link
 ```
 
-`npm install` pulls pinned OpenClaw-style scoped `pi` packages from npm:
-`@mariozechner/pi-agent-core`, `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`, and `@mariozechner/pi-tui`.
-Lumo runtime startup uses the installed `pi` toolchain, not a checked-out GitHub monorepo under `node_modules/pi-mono`.
-
-If you prefer a one-shot global install instead of a link:
-
-```bash
-npm i -g .
-```
-
-After either `npm link` or `npm i -g .`, run the installed CLI directly:
+After linking:
 
 ```bash
 lumo
 ```
 
-If `lumo.config.json` does not exist, Lumo automatically opens setup and writes config before continuing.
-
-Convenience scripts:
+If you prefer to run without linking globally:
 
 ```bash
-npm run build
-npm run link:global
-npm run install:global
+npm run cli
 ```
 
-Migration note:
-If you previously relied on the GitHub `pi-mono` checkout or a bootstrap command such as
-`npm --prefix './node_modules/pi-mono' run build`, replace that with installed `pi` toolchain
-packages plus runtime checks like `pi --version` and `pi doctor`.
+## First run
 
-## Setup
+On first run, Lumo looks for `./lumo.config.json`.
 
-First run: just execute `lumo`.
-If config is missing, setup starts automatically and writes `lumo.config.json`.
+- If the file exists, Lumo starts with that config
+- If the file is missing, Lumo launches guided setup automatically
 
-Manual setup is also available:
+You can also start setup directly:
 
 ```bash
+lumo init
 lumo setup
 ```
 
-Wizard UX notes:
+## Setup modes
 
-- Yes/No and enum choices use an interactive selector. Use the arrow keys to move and `Enter` to confirm.
-- Free-form text is still used for values like config path, model names, token env vars, and allowlists.
-- The wizard shows a final summary of all selected values and requires one last Yes/No confirmation before writing the file.
+The setup wizard has two paths:
+
+- `Quickstart` creates a minimal local config
+- `Custom` lets you configure Discord integration and alerting
+
+The guided setup currently focuses on Lumo-owned integrations such as:
+
+- Discord inbound configuration
+- Discord webhook alerts
+- terminal alerts
+
+## Discord setup
+
+There are two separate Discord surfaces:
+
+- `Discord inbound`: lets you send tasks and control messages to Lumo from Discord
+- `Discord webhook alerts`: lets Lumo send escalation alerts to a Discord channel
+
+If you only want escalation alerts, a webhook URL is enough.
+
+If you want Discord as a control surface, you also need:
+
+- a Discord bot token
+- allowed channel scopes
+- optional allowed user filters
+- an optional mention prefix
+
+The example config shows both surfaces in one place: `lumo.config.example.json`.
 
 ## Run
+
+Default config path:
 
 ```bash
 lumo
 ```
 
-On startup, Lumo checks whether the `pi-mono` runtime is reachable. If the first health-check fails and auto-bootstrap is enabled, Lumo runs the configured runtime command list, waits briefly, and retries the health-check once before giving up.
-
-Or with an explicit config path:
+Explicit config path:
 
 ```bash
 lumo ./lumo.config.json
 ```
 
-If you have not linked or globally installed the package yet, you can still run the built CLI locally:
+CLI help:
 
 ```bash
-npm run cli
-npm run setup
+lumo --help
 ```
 
-For a future published package, the equivalent no-install flow would be:
+## How task control works
 
-```bash
-npx lumo
-```
+Lumo supports natural-language task control through its intent router.
 
-## Basic usage (natural language)
+Common flows:
 
-After startup, type naturally:
+- start a new task
+- send a follow-up to the current task
+- ask for task status
+- halt the current task
+- resume a halted task with extra guidance
 
-- `네이버에서 오픈클로 검색해서 요약해`
-- `지금 상태 어때?`
-- `이전 작업 이어서 진행해`
-- `이 작업 멈춰`
+When the supervisor detects a warning or critical condition, it can:
 
-## Notes
+- continue normally
+- inject feedback into the running task
+- halt the task and emit an escalation alert
 
-- Legacy runtime fallback is removed.
-- If `runtime.provider` is not `pi-mono`, startup fails fast.
-- If `runtime.bootstrap.enabled` is `false` or `LUMO_RUNTIME_AUTO_BOOTSTRAP=0`, Lumo keeps the existing fail-fast startup behavior with no bootstrap attempt.
-- Default bootstrap behavior is to run safe runtime/toolchain checks against the installed `pi` CLI: `pi --version` and `pi doctor`.
-- Override bootstrap commands in config with `runtime.bootstrap.commands` or via `LUMO_RUNTIME_BOOTSTRAP_COMMANDS`, using `;;` between commands, for example `export LUMO_RUNTIME_BOOTSTRAP_COMMANDS="pi --version ;; pi doctor"`.
-- Tune the retry delay with `runtime.bootstrap.retryBackoffMs` or `LUMO_RUNTIME_BOOTSTRAP_RETRY_BACKOFF_MS`.
-- When startup checks still fail, Lumo prints the attempted commands so you can run, replace, or disable them directly during migration.
+## Alerts
+
+Supported alert channels today:
+
+- terminal
+- Discord webhook
+- voice-call command integration for critical alerts
+
+Current limitation:
+
+- Telegram alert dispatch is not implemented yet
+
+## Example config
+
+See `lumo.config.example.json` for a full configuration example covering runtime, supervisor, Discord, alerts, and channel adapters.
