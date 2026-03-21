@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "npm run typecheck",
     "test": "npm run build && node --test dist/test/**/*.test.js",
-    "dev": "node --experimental-strip-types src/index.ts"
+    "dev": "node --experimental-strip-types src/index.ts",
+    "postinstall": "patch-package"
   },
   "keywords": [
     "actor",
@@ -34,12 +35,22 @@
     "@mariozechner/pi-ai": "0.55.3",
     "@mariozechner/pi-coding-agent": "0.55.3",
     "@mariozechner/pi-tui": "0.55.3",
+    "@playwright/test": "^1.58.2",
     "agent-browser": "^0.17.1",
+    "camoufox-js": "^0.9.2",
     "discord.js": "^14.18.0",
     "ink": "^5.2.1",
+    "playwright-core": "^1.52.0",
+    "puppeteer": "^24.39.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "react": "^19.1.0"
   },
+  "overrides": {
+    "playwright-core": "1.52.0"
+  },
   "devDependencies": {
+    "patch-package": "^8.0.0",
     "typescript": "^5.8.2"
   }
 }

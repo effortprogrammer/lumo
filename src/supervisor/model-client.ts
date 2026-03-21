@@ -1,18 +1,21 @@
-import { type LogBatch } from "../logging/log-batcher.js";
 import {
   type SupervisorDecision,
   SupervisorDecisionSchema,
 } from "./decision.js";
+import { type SupervisorInputEnvelope } from "./contracts.js";
+import { type LumoConfig } from "../config/load-config.js";
+import { assessBottleneck } from "./bottleneck.js";
+import { assessTaskPhase } from "./phase.js";
 
 export interface SupervisorModelClient {
-  decide(batch: LogBatch): Promise<SupervisorDecision>;
+  decide(input: SupervisorInputEnvelope): Promise<SupervisorDecision>;
 }
 
 export class MockSupervisorClient implements SupervisorModelClient {
   constructor(
     private readonly factory:
       | SupervisorDecision
-      | ((batch: LogBatch) => SupervisorDecision | Promise<SupervisorDecision>) = {
+      | ((input: SupervisorInputEnvelope) => SupervisorDecision | Promise<SupervisorDecision>) = {
         status: "ok",
         confidence: 0.99,
         reason: "Mock supervisor allows execution to continue.",
@@ -20,16 +23,88 @@ export class MockSupervisorClient implements SupervisorModelClient {
       },
   ) {}
 
-  async decide(batch: LogBatch): Promise<SupervisorDecision> {
+  async decide(input: SupervisorInputEnvelope): Promise<SupervisorDecision> {
     const candidate =
-      typeof this.factory === "function" ? await this.factory(batch) : this.factory;
+      typeof this.factory === "function" ? await this.factory(input) : this.factory;
 
     return SupervisorDecisionSchema.parse(candidate);
   }
 }
 
 export class HeuristicSupervisorClient implements SupervisorModelClient {
-  async decide(batch: LogBatch): Promise<SupervisorDecision> {
+  async decide(input: SupervisorInputEnvelope): Promise<SupervisorDecision> {
+    const lifecycleCooldown = assessLifecycleCooldown(input.recentLifecycleEvents);
+    if (lifecycleCooldown) {
+      return lifecycleCooldown;
+    }
+
+    const batch = {
+      taskInstruction: input.taskInstruction,
+      conversationHistory: input.conversationHistory,
+      batch: input.recentLogs,
+      recentLogs: input.recentLogs,
+      anomalies: input.anomalies,
+      browserState: input.browserState,
+      browserProgress: input.browserProgress,
+      triggeredBy: input.triggeredBy,
+    };
+    const recentLogs = batch.recentLogs ?? batch.batch;
+    const taskPhase = input.taskPhase ?? assessTaskPhase({
+      taskInstruction: batch.taskInstruction,
+      browserState: batch.browserState,
+      browserProgress: batch.browserProgress,
+      recentLogs,
+      collectionState: input.collectionState,
+    });
+    const latestLog = recentLogs.at(-1);
+    if (
+      taskPhase.currentPhase === "requirement_extraction" &&
+      taskPhase.recommendation?.targetPhase === "synthesis" &&
+      latestLog?.status !== "error"
+    ) {
+      return {
+        status: "warning",
+        confidence: Math.max(taskPhase.confidence, 0.88),
+        reason: taskPhase.recommendation.reason,
+        suggestion: taskPhase.recommendation.instructions.join(" "),
+        action: "feedback",
+      };
+    }
+
+    const bottleneck = assessBottleneck({
+      anomalies: batch.anomalies,
+      browserProgress: batch.browserProgress,
+      browserState: batch.browserState,
+      recentLogs,
+      taskInstruction: batch.taskInstruction,
+      taskPhase,
+      collectionState: input.collectionState,
+    });
+    if (bottleneck) {
+      return {
+        status: bottleneck.severity,
+        confidence: bottleneck.confidence,
+        reason: bottleneck.diagnosis,
+        suggestion: bottleneck.recoveryPlan.instructions.join(" "),
+        action: bottleneck.recoverable ? "feedback" : "halt",
+      };
+    }
+
+    const latestAnomaly = [...batch.anomalies]
+      .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt))
+      .at(-1);
+    if (latestAnomaly) {
+      return {
+        status: latestAnomaly.severity,
+        confidence: latestAnomaly.severity === "critical" ? 0.97 : 0.82,
+        reason: latestAnomaly.message,
+        suggestion: latestAnomaly.severity === "critical"
+          ? "Stop the task and ask the operator to inspect the runtime anomaly."
+          : "Adjust the strategy before continuing.",
+        action: latestAnomaly.severity === "critical" ? "halt" : "feedback",
+      };
+    }
+
     const riskyRecord = batch.batch.find((record) => (record.riskKeywords?.length ?? 0) > 0);
     if (riskyRecord) {
       return {
@@ -45,6 +120,17 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
       (record) => record.status === "error" || (record.exitCode ?? 0) !== 0,
     );
     if (failedRecord) {
+      if (failedRecord.tool === "agent-browser" && batch.browserProgress) {
+        return {
+          status: "warning",
+          confidence: 0.84,
+          reason: batch.browserProgress.reason,
+          suggestion: batch.browserProgress.recommendedNext
+            ?? "Inspect the current page state and retry with a more precise browser command.",
+          action: "feedback",
+        };
+      }
+
       return {
         status: "warning",
         confidence: 0.8,
@@ -78,6 +164,51 @@ export class HeuristicSupervisorClient implements SupervisorModelClient {
   }
 }
 
+function assessLifecycleCooldown(
+  events: SupervisorInputEnvelope["recentLifecycleEvents"],
+): SupervisorDecision | null {
+  if (!events?.length) {
+    return null;
+  }
+
+  const issuedIds = new Set<string>();
+  const resolvedIds = new Set<string>();
+  for (const event of events) {
+    const interventionId = readInterventionId(event.payload);
+    if (!interventionId) {
+      continue;
+    }
+    if (event.type === "supervisor.intervention.issued") {
+      issuedIds.add(interventionId);
+      continue;
+    }
+    if (
+      event.type === "actor.intervention.result"
+      || event.type === "supervisor.intervention.effect"
+    ) {
+      resolvedIds.add(interventionId);
+    }
+  }
+
+  const pending = [...issuedIds].filter((id) => !resolvedIds.has(id));
+  if (pending.length === 0) {
+    return null;
+  }
+
+  return {
+    status: "ok",
+    confidence: 0.76,
+    reason: `Waiting for the actor to finish applying recent supervisor intervention(s): ${pending.join(", ")}.`,
+    action: "continue",
+  };
+}
+
+function readInterventionId(payload: Record<string, unknown>): string | undefined {
+  return typeof payload.interventionId === "string"
+    ? payload.interventionId
+    : undefined;
+}
+
 export class OpenAICompatibleSupervisorClient implements SupervisorModelClient {
   constructor(
     private readonly options: {
@@ -90,7 +221,7 @@ export class OpenAICompatibleSupervisorClient implements SupervisorModelClient {
     },
   ) {}
 
-  async decide(batch: LogBatch): Promise<SupervisorDecision> {
+  async decide(input: SupervisorInputEnvelope): Promise<SupervisorDecision> {
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
@@ -121,12 +252,7 @@ export class OpenAICompatibleSupervisorClient implements SupervisorModelClient {
               },
               {
                 role: "user",
-                content: JSON.stringify({
-                  taskInstruction: batch.taskInstruction,
-                  triggeredBy: batch.triggeredBy,
-                  conversationHistory: batch.conversationHistory,
-                  batch: batch.batch,
-                }),
+                content: JSON.stringify(input),
               },
             ],
           }),
@@ -159,11 +285,123 @@ export class OpenAICompatibleSupervisorClient implements SupervisorModelClient {
         throw new Error("OpenAI-compatible supervisor response did not include text content");
       }
 
-      return SupervisorDecisionSchema.parse(JSON.parse(text));
+      return SupervisorDecisionSchema.parse(parseJsonText(text));
     } finally {
       clearTimeout(timeout);
     }
   }
+}
+
+export class AnthropicCompatibleSupervisorClient implements SupervisorModelClient {
+  constructor(
+    private readonly options: {
+      baseUrl: string;
+      apiKey: string;
+      model: string;
+      systemPrompt: string;
+      timeoutMs?: number;
+      fetchImpl?: typeof fetch;
+    },
+  ) {}
+
+  async decide(input: SupervisorInputEnvelope): Promise<SupervisorDecision> {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      this.options.timeoutMs ?? 30_000,
+    );
+
+    try {
+      const response = await (this.options.fetchImpl ?? fetch)(
+        buildAnthropicMessagesUrl(this.options.baseUrl),
+        {
+          method: "POST",
+          headers: buildAnthropicHeaders(this.options.apiKey),
+          body: JSON.stringify({
+            model: this.options.model,
+            max_tokens: 1024,
+            system: [
+              this.options.systemPrompt,
+              "Return strict JSON only with keys: status, confidence, reason, suggestion, action.",
+              "status must be ok, warning, or critical. action must be continue, feedback, or halt.",
+            ].join(" "),
+            messages: [
+              {
+                role: "user",
+                content: JSON.stringify(input),
+              },
+            ],
+          }),
+          signal: controller.signal,
+        },
+      );
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(
+          `Anthropic-compatible supervisor request failed with HTTP ${response.status}${body ? ` ${body.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      const payload = await response.json() as {
+        content?: Array<{
+          type?: string;
+          text?: string;
+        }>;
+      };
+      const text = payload.content
+        ?.filter((part) => part.type === "text" && typeof part.text === "string")
+        .map((part) => part.text ?? "")
+        .join("")
+        .trim();
+
+      if (!text) {
+        throw new Error("Anthropic-compatible supervisor response did not include text content");
+      }
+
+      return SupervisorDecisionSchema.parse(parseJsonText(text));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+export function createConfiguredSupervisorClient(config: LumoConfig): SupervisorModelClient {
+  if (config.supervisor.client === "heuristic") {
+    return new HeuristicSupervisorClient();
+  }
+
+  if (config.supervisor.client === "anthropic-compatible") {
+    const anthropic = config.supervisor.anthropicCompatible;
+    if (anthropic.enabled && anthropic.baseUrl && anthropic.apiKey && anthropic.model) {
+      return new AnthropicCompatibleSupervisorClient({
+        baseUrl: anthropic.baseUrl,
+        apiKey: anthropic.apiKey,
+        model: anthropic.model,
+        systemPrompt: config.supervisor.systemPrompt,
+        timeoutMs: anthropic.timeoutMs,
+      });
+    }
+
+    return new HeuristicSupervisorClient();
+  }
+
+  if (config.supervisor.client === "openai-compatible") {
+    const openai = config.supervisor.openaiCompatible;
+    if (openai.enabled && openai.baseUrl && openai.apiKey && openai.model) {
+      return new OpenAICompatibleSupervisorClient({
+        baseUrl: openai.baseUrl,
+        apiKey: openai.apiKey,
+        model: openai.model,
+        systemPrompt: config.supervisor.systemPrompt,
+        timeoutMs: openai.timeoutMs,
+      });
+    }
+
+    return new HeuristicSupervisorClient();
+  }
+
+  return new MockSupervisorClient();
 }
 
 function buildChatCompletionsUrl(baseUrl: string): string {
@@ -171,4 +409,47 @@ function buildChatCompletionsUrl(baseUrl: string): string {
   return trimmed.endsWith("/chat/completions")
     ? trimmed
     : `${trimmed}/chat/completions`;
+}
+
+function buildAnthropicMessagesUrl(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  return trimmed.endsWith("/messages")
+    ? trimmed
+    : `${trimmed}/messages`;
+}
+
+function buildAnthropicHeaders(apiKey: string): Record<string, string> {
+  const trimmed = apiKey.trim();
+  return trimmed.toLowerCase().startsWith("bearer ")
+    ? {
+      authorization: trimmed,
+      "content-type": "application/json",
+    }
+    : {
+      "x-api-key": trimmed,
+      "content-type": "application/json",
+    };
+}
+
+function parseJsonText(text: string): unknown {
+  const trimmed = text.trim();
+  const candidates = [trimmed];
+  if (trimmed.startsWith("```")) {
+    const lines = trimmed.split("\n");
+    const body = lines.slice(1, lines.at(-1)?.startsWith("```") ? -1 : undefined).join("\n").trim();
+    candidates.push(body);
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+  }
+
+  return JSON.parse(trimmed);
 }

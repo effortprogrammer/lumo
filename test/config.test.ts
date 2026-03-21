@@ -11,7 +11,7 @@ import {
 describe("loadConfig", () => {
   it("returns defaults when the config file is missing", async () => {
     const config = await loadConfig("./missing-config.json");
-    assert.equal(config.runtime.provider, "pi-mono");
+    assert.equal(config.runtime.provider, "pi");
     assert.equal(config.actor.codingAgent.provider, "codex");
     assert.equal(config.supervisor.client, "mock");
     assert.equal(config.runtime.bootstrap.enabled, true);
@@ -26,7 +26,7 @@ describe("loadConfig", () => {
         configPath,
         JSON.stringify({
           runtime: {
-            provider: "pi-mono",
+            provider: "pi",
             bootstrap: {
               enabled: false,
               commands: ["custom-bootstrap --start"],
@@ -34,7 +34,6 @@ describe("loadConfig", () => {
             },
           },
           actor: {
-            model: "custom-actor",
             codingAgent: {
               provider: "claude",
             },
@@ -90,11 +89,10 @@ describe("loadConfig", () => {
       const config = await loadConfig(configPath);
       const defaults = createDefaultConfig();
 
-      assert.equal(config.runtime.provider, "pi-mono");
+      assert.equal(config.runtime.provider, "pi");
       assert.equal(config.runtime.bootstrap.enabled, false);
       assert.deepEqual(config.runtime.bootstrap.commands, ["custom-bootstrap --start"]);
       assert.equal(config.runtime.bootstrap.retryBackoffMs, 50);
-      assert.equal(config.actor.model, "custom-actor");
       assert.equal(config.actor.codingAgent.provider, "claude");
       assert.equal(config.supervisor.client, "openai-compatible");
       assert.equal(config.supervisor.openaiCompatible.enabled, true);
@@ -134,7 +132,7 @@ describe("loadConfig", () => {
 
     assert.equal(config.actor.browserRunner.metadata?.mode, "mock");
     assert.equal(config.actor.codingAgent.commands.codex.metadata?.mode, "mock");
-    assert.equal(config.runtime.provider, "pi-mono");
+    assert.equal(config.runtime.provider, "pi");
     assert.equal(config.runtime.bootstrap.enabled, true);
     assert.deepEqual(config.runtime.bootstrap.commands, ["pi --version", "pi doctor"]);
     assert.equal(config.supervisor.openaiCompatible.enabled, false);
@@ -145,7 +143,7 @@ describe("loadConfig", () => {
   it("parses discord gateway inbound defaults from env", () => {
     const config = createDefaultConfig({
       env: {
-        LUMO_RUNTIME_PROVIDER: "pi-mono",
+        LUMO_RUNTIME_PROVIDER: "pi",
         LUMO_RUNTIME_AUTO_BOOTSTRAP: "false",
         LUMO_RUNTIME_BOOTSTRAP_COMMANDS: "pi --version ;; pi doctor",
         LUMO_RUNTIME_BOOTSTRAP_RETRY_BACKOFF_MS: "25",
@@ -164,7 +162,7 @@ describe("loadConfig", () => {
       resolveBinary: () => undefined,
     });
 
-    assert.equal(config.runtime.provider, "pi-mono");
+    assert.equal(config.runtime.provider, "pi");
     assert.equal(config.runtime.bootstrap.enabled, false);
     assert.deepEqual(config.runtime.bootstrap.commands, ["pi --version", "pi doctor"]);
     assert.equal(config.runtime.bootstrap.retryBackoffMs, 25);
@@ -189,7 +187,84 @@ describe("loadConfig", () => {
     ]);
   });
 
-  it("rejects legacy runtime provider values from env", () => {
+  it("supports anthropic-compatible supervisor defaults and overrides", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-config-anthropic-"));
+    const configPath = join(tempDir, "lumo.config.json");
+
+    try {
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          supervisor: {
+            client: "anthropic-compatible",
+            anthropicCompatible: {
+              enabled: true,
+              baseUrl: "https://ccapi.labs.mengmota.com/anthropic/v1",
+              model: "claude-opus-4-6",
+            },
+          },
+        }),
+      );
+
+      const config = await loadConfig(configPath);
+      assert.equal(config.supervisor.client, "anthropic-compatible");
+      assert.equal(config.supervisor.anthropicCompatible.enabled, true);
+      assert.equal(config.supervisor.anthropicCompatible.baseUrl, "https://ccapi.labs.mengmota.com/anthropic/v1");
+      assert.equal(config.supervisor.anthropicCompatible.model, "claude-opus-4-6");
+      assert.equal(config.supervisor.anthropicCompatible.timeoutMs, 30_000);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to standard anthropic env vars for anthropic-compatible supervisor auth", () => {
+    const config = createDefaultConfig({
+      env: {
+        LUMO_SUPERVISOR_ANTHROPIC_ENABLED: "true",
+        ANTHROPIC_API_KEY: "anthropic-test-token",
+      },
+      resolveBinary: () => undefined,
+    });
+
+    assert.equal(config.supervisor.anthropicCompatible.enabled, true);
+    assert.equal(config.supervisor.anthropicCompatible.apiKey, "anthropic-test-token");
+  });
+
+  it("falls back to ccapi env vars for anthropic-compatible supervisor auth", () => {
+    const config = createDefaultConfig({
+      env: {
+        LUMO_SUPERVISOR_ANTHROPIC_ENABLED: "true",
+        CCAPI_API_KEY: "ccapi-test-token",
+      },
+      resolveBinary: () => undefined,
+    });
+
+    assert.equal(config.supervisor.anthropicCompatible.enabled, true);
+    assert.equal(config.supervisor.anthropicCompatible.apiKey, "ccapi-test-token");
+  });
+
+  it("tolerates legacy actor.model-only overrides", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-config-model-migration-"));
+    const configPath = join(tempDir, "lumo.config.json");
+
+    try {
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          actor: {
+            model: "gpt-4.1",
+          },
+        }),
+      );
+
+      const config = await loadConfig(configPath);
+      assert.equal(config.actor.codingAgent.provider, "codex");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsupported runtime provider values from env", () => {
     assert.throws(
       () => createDefaultConfig({
         env: {
@@ -197,11 +272,11 @@ describe("loadConfig", () => {
         },
         resolveBinary: () => undefined,
       }),
-      /Lumo now requires runtime\.provider to be "pi-mono"/i,
+      /Lumo now requires runtime\.provider to be "pi"/i,
     );
   });
 
-  it("rejects legacy runtime provider values from config files", async () => {
+  it("rejects unsupported runtime provider values from config files", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "lumo-config-"));
     const configPath = join(tempDir, "lumo.config.json");
 

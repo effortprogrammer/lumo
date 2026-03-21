@@ -7,6 +7,7 @@ import {
 } from "../domain/task.js";
 import {
   resolveBinaryCommand,
+  resolveBinaryCommandFromModule,
   type BinaryResolver,
 } from "../runtime/command-resolution.js";
 
@@ -18,7 +19,7 @@ export interface CommandSpec {
 
 export interface LumoConfig {
   runtime: {
-    provider: "pi-mono";
+    provider: "pi";
     bootstrap: {
       enabled: boolean;
       commands: string[];
@@ -26,7 +27,6 @@ export interface LumoConfig {
     };
   };
   actor: {
-    model: string;
     systemPrompt: string;
     tools: ActorToolName[];
     browserRunner: CommandSpec;
@@ -38,8 +38,15 @@ export interface LumoConfig {
   supervisor: {
     model: string;
     systemPrompt: string;
-    client: "mock" | "heuristic" | "openai-compatible";
+    client: "mock" | "heuristic" | "openai-compatible" | "anthropic-compatible";
     openaiCompatible: {
+      enabled: boolean;
+      baseUrl?: string;
+      apiKey?: string;
+      model?: string;
+      timeoutMs: number;
+    };
+    anthropicCompatible: {
       enabled: boolean;
       baseUrl?: string;
       apiKey?: string;
@@ -140,10 +147,12 @@ export interface CreateDefaultConfigOptions {
   cwd?: string;
 }
 
-const defaultPiToolchainStartupCommands = [
-  "pi --version",
-  "pi doctor",
-];
+function createPiToolchainStartupCommands(binary: string): string[] {
+  return [
+    `${binary} --version`,
+    `${binary} doctor`,
+  ];
+}
 
 export function createDefaultConfig(
   options: CreateDefaultConfigOptions = {},
@@ -182,7 +191,10 @@ export function createDefaultConfig(
     };
   };
 
-  const resolvedBrowserRunner = resolveBinary(["agent-browser"], { env });
+  const resolvedBrowserRunner = resolveBinary(["./bin/lumo-agent-browser.js", "agent-browser"], {
+    cwd,
+    env,
+  });
 
   return {
     runtime: {
@@ -200,8 +212,7 @@ export function createDefaultConfig(
       },
     },
     actor: {
-      model: "local-actor",
-      systemPrompt: "Execute local task instructions and report tool results.",
+      systemPrompt: "Execute local task instructions, using the external agent-browser CLI for browser work, and report tool results.",
       tools: ["bash", "agent-browser", "coding-agent"],
       browserRunner: resolvedBrowserRunner
         ? {
@@ -237,9 +248,26 @@ export function createDefaultConfig(
       openaiCompatible: {
         enabled: false,
         baseUrl: env.LUMO_SUPERVISOR_OPENAI_BASE_URL,
-        apiKey: env.LUMO_SUPERVISOR_OPENAI_API_KEY,
+        apiKey: firstDefinedEnv(
+          env,
+          "LUMO_SUPERVISOR_OPENAI_API_KEY",
+          "OPENAI_API_KEY",
+          "CCAPI_API_KEY",
+        ),
         model: env.LUMO_SUPERVISOR_OPENAI_MODEL,
         timeoutMs: parsePositiveInteger(env.LUMO_SUPERVISOR_OPENAI_TIMEOUT_MS, 15_000),
+      },
+      anthropicCompatible: {
+        enabled: parseBoolean(env.LUMO_SUPERVISOR_ANTHROPIC_ENABLED, false),
+        baseUrl: env.LUMO_SUPERVISOR_ANTHROPIC_BASE_URL ?? "https://ccapi.labs.mengmota.com/anthropic/v1",
+        apiKey: firstDefinedEnv(
+          env,
+          "LUMO_SUPERVISOR_ANTHROPIC_API_KEY",
+          "ANTHROPIC_API_KEY",
+          "CCAPI_API_KEY",
+        ),
+        model: env.LUMO_SUPERVISOR_ANTHROPIC_MODEL ?? "claude-opus-4-6",
+        timeoutMs: parsePositiveInteger(env.LUMO_SUPERVISOR_ANTHROPIC_TIMEOUT_MS, 30_000),
       },
     },
     batch: {
@@ -399,6 +427,10 @@ export function mergeConfig(
         ...defaults.supervisor.openaiCompatible,
         ...overrides.supervisor?.openaiCompatible,
       },
+      anthropicCompatible: {
+        ...defaults.supervisor.anthropicCompatible,
+        ...overrides.supervisor?.anthropicCompatible,
+      },
     },
     batch: {
       ...defaults.batch,
@@ -496,11 +528,11 @@ export function mergeConfig(
 }
 
 function validateConfig(config: LumoConfig): LumoConfig {
-  if (config.runtime.provider !== "pi-mono") {
-    throw new Error(
-      `Unsupported runtime.provider "${String(config.runtime.provider)}" in config. Lumo now requires "pi-mono".`,
-    );
-  }
+    if (config.runtime.provider !== "pi") {
+      throw new Error(
+        `Unsupported runtime.provider "${String(config.runtime.provider)}" in config. Lumo now requires "pi".`,
+      );
+    }
 
   return config;
 }
@@ -531,13 +563,13 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
-function parseRuntimeProvider(value: string | undefined): "pi-mono" {
-  if (!value || value === "pi-mono") {
-    return "pi-mono";
+function parseRuntimeProvider(value: string | undefined): "pi" {
+  if (!value || value === "pi") {
+    return "pi";
   }
 
   throw new Error(
-    `Unsupported LUMO_RUNTIME_PROVIDER value "${value}". Lumo now requires runtime.provider to be "pi-mono".`,
+    `Unsupported LUMO_RUNTIME_PROVIDER value "${value}". Lumo now requires runtime.provider to be "pi".`,
   );
 }
 
@@ -570,6 +602,20 @@ function parseBootstrapCommands(
     .filter((entry) => entry.length > 0);
 }
 
+function firstDefinedEnv(
+  env: Record<string, string | undefined>,
+  ...keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const value = env[key]?.trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
 function detectDefaultPiToolchainStartupCommands(
   cwd: string,
   env: Record<string, string | undefined>,
@@ -586,8 +632,18 @@ function detectDefaultPiToolchainStartupCommands(
     return existsSync(resolve(packageRoot, "package.json"));
   });
 
-  if (hasInstalledPiToolchainPackage || resolveBinary(["pi"], { env })) {
-    return [...defaultPiToolchainStartupCommands];
+  const resolvedPiBinary = resolveBinary([
+    "pi",
+    "./node_modules/.bin/pi",
+  ], {
+    cwd,
+    env,
+  }) ?? resolveBinaryCommandFromModule(["pi"], import.meta.url, {
+    env,
+  });
+
+  if (hasInstalledPiToolchainPackage || resolvedPiBinary) {
+    return createPiToolchainStartupCommands(resolvedPiBinary?.candidate ?? "pi");
   }
 
   return [];

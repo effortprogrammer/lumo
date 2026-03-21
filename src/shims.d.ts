@@ -56,12 +56,17 @@ declare module "node:child_process" {
       stdio?: [string, string, string];
     },
   ): {
+    stdin: {
+      write: (chunk: string) => boolean;
+      end: () => void;
+    };
     stdout: {
       on: (event: string, listener: (chunk: unknown) => void) => void;
     };
     stderr: {
       on: (event: string, listener: (chunk: unknown) => void) => void;
     };
+    kill: (signal?: string) => boolean;
     on: (event: string, listener: (value: unknown) => void) => void;
   };
 }
