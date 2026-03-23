@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -20,6 +20,7 @@ describe("setup wizard", () => {
   it("generates config JSON from non-interactive flags", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-"));
     const configPath = join(tempDir, "lumo.config.json");
+    const homeDir = join(tempDir, "home");
 
     try {
       const exitCode = await runSetupCli([
@@ -42,7 +43,22 @@ describe("setup wizard", () => {
         " @lumo ",
         "--terminal-alerts",
         "true",
+        "--model-provider",
+        "openrouter",
+        "--model-api-key",
+        " sk-or-v1-12345678 ",
+        "--supervisor-provider",
+        "openai-compatible",
+        "--supervisor-base-url",
+        " https://api.openai.com/v1 ",
+        "--supervisor-api-key",
+        " OPENAI_API_KEY ",
+        "--supervisor-model",
+        " gpt-4o-mini ",
       ], {
+        env: {
+          HOME: homeDir,
+        },
         output: createWriter(),
         error: createWriter(),
       });
@@ -82,6 +98,24 @@ describe("setup wizard", () => {
             },
           },
         },
+        supervisor: {
+          client: "openai-compatible",
+          model: "gpt-4o-mini",
+          openaiCompatible: {
+            enabled: true,
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "OPENAI_API_KEY",
+            model: "gpt-4o-mini",
+          },
+          anthropicCompatible: {
+            enabled: false,
+          },
+        },
+      });
+
+      const authRaw = await readFile(join(homeDir, ".pi", "agent", "auth.json"), "utf8");
+      assert.deepEqual(JSON.parse(authRaw), {
+        openrouter: "sk-or-v1-12345678",
       });
     } finally {
       await rm(tempDir, { recursive: true, force: true });
@@ -222,11 +256,21 @@ describe("setup wizard", () => {
       allowedChannels: [],
       allowedUsers: [],
       enableTerminalAlerts: false,
+      modelProvider: "anthropic",
+      modelApiKey: "sk-ant-1234",
+      supervisor: {
+        provider: "anthropic-compatible",
+        baseUrl: "https://api.anthropic.com/v1",
+        apiKey: "ANTHROPIC_API_KEY",
+        model: "claude-sonnet-4-20250514",
+      },
     });
 
     assert.match(summary, /^Setup summary/m);
     assert.match(summary, /Discord enabled: No/);
     assert.match(summary, /Allowed Discord channels: \(none\)/);
+    assert.match(summary, /Model provider: Anthropic \(API key configured: .*1234\)/);
+    assert.match(summary, /Supervisor: anthropic-compatible \(claude-sonnet-4-20250514\)/);
   });
 
   it("shows a summary and stops before writing when final confirmation is declined", async () => {
@@ -241,7 +285,7 @@ describe("setup wizard", () => {
         createPrompter: () =>
           createScriptedPrompter({
             asks: [],
-            selects: [0, 1],
+            selects: [0, 5, 1],
           }),
       });
 
@@ -266,7 +310,7 @@ describe("setup wizard", () => {
         createPrompter: () =>
           createScriptedPrompter({
             asks: [],
-            selects: [0, 0],
+            selects: [0, 5, 0],
           }),
       });
 
@@ -296,7 +340,7 @@ describe("setup wizard", () => {
         createPrompter: () =>
           createScriptedPrompter({
             asks: [],
-            selects: [0, 0],
+            selects: [0, 5, 0],
           }),
       });
 
@@ -325,7 +369,7 @@ describe("setup wizard", () => {
         createPrompter: () =>
           createScriptedPrompter({
             asks: [],
-            selects: [0, 0],
+            selects: [0, 5, 0],
           }),
       });
 
@@ -405,6 +449,189 @@ describe("setup wizard", () => {
       assert.equal(failExitCode, 0);
       assert.match(passWriter.buffer, /PASS: BOT_TOKEN:6/);
       assert.match(failWriter.buffer, /FAIL: HTTP 401 invalid token/);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("supports quickstart with provider selection and writes pi auth.json", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-provider-"));
+    const configPath = join(tempDir, "lumo.config.json");
+    const homeDir = join(tempDir, "home");
+    const writer = createBufferingWriter();
+
+    try {
+      const exitCode = await runSetupCli(["--config", configPath], {
+        env: {
+          HOME: homeDir,
+        },
+        output: writer,
+        error: writer,
+        createPrompter: () =>
+          createScriptedPrompter({
+            asks: ["sk-ant-quick-1234"],
+            selects: [0, 0, 0],
+          }),
+      });
+
+      assert.equal(exitCode, 0);
+      assert.match(writer.buffer, /Model provider: Anthropic \(API key configured: .*1234\)/);
+
+      const authRaw = await readFile(join(homeDir, ".pi", "agent", "auth.json"), "utf8");
+      assert.deepEqual(JSON.parse(authRaw), {
+        anthropic: "sk-ant-quick-1234",
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("supports custom setup with supervisor configuration", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-supervisor-"));
+    const configPath = join(tempDir, "lumo.config.json");
+    const homeDir = join(tempDir, "home");
+
+    try {
+      const exitCode = await runSetupCli(["--config", configPath], {
+        env: {
+          HOME: homeDir,
+        },
+        output: createWriter(),
+        error: createWriter(),
+        createPrompter: () =>
+          createScriptedPrompter({
+            asks: ["", "", "", ""],
+            selects: [1, 1, 1, 5, 0, 1, 0],
+          }),
+      });
+
+      assert.equal(exitCode, 0);
+
+      const raw = await readFile(configPath, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      assert.deepEqual(parsed, {
+        alerts: {
+          enableTerminalBell: false,
+          channels: {
+            terminal: {
+              enabled: false,
+            },
+            discord: {
+              enabled: false,
+            },
+          },
+        },
+        channels: {
+          adapters: {
+            discord: {
+              enabled: false,
+              inbound: {
+                mode: "file",
+                filePath: "./.lumo/discord-inbound.jsonl",
+                tokenEnvVar: "LUMO_CHANNELS_DISCORD_BOT_TOKEN",
+                allowedChannels: [],
+                allowedUsers: [],
+              },
+            },
+          },
+        },
+        supervisor: {
+          client: "openai-compatible",
+          model: "gpt-4o",
+          openaiCompatible: {
+            enabled: true,
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "OPENAI_API_KEY",
+            model: "gpt-4o",
+          },
+          anthropicCompatible: {
+            enabled: false,
+          },
+        },
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("merges auth.json without overwriting other providers", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-auth-merge-"));
+    const configPath = join(tempDir, "lumo.config.json");
+    const homeDir = join(tempDir, "home");
+    const authPath = join(homeDir, ".pi", "agent", "auth.json");
+
+    try {
+      await mkdir(join(homeDir, ".pi", "agent"), { recursive: true });
+      await writeFile(authPath, `${JSON.stringify({ openai: "existing-openai" }, null, 2)}\n`);
+
+      const exitCode = await runSetupCli([
+        "--non-interactive",
+        "--config",
+        configPath,
+        "--discord-enabled",
+        "false",
+        "--discord-inbound-mode",
+        "file",
+        "--terminal-alerts",
+        "false",
+        "--model-provider",
+        "anthropic",
+        "--model-api-key",
+        "sk-ant-merge-9999",
+      ], {
+        env: {
+          HOME: homeDir,
+        },
+        output: createWriter(),
+        error: createWriter(),
+      });
+
+      assert.equal(exitCode, 0);
+      const authRaw = await readFile(authPath, "utf8");
+      assert.deepEqual(JSON.parse(authRaw), {
+        openai: "existing-openai",
+        anthropic: "sk-ant-merge-9999",
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves auth.json untouched when provider setup is skipped", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-setup-auth-skip-"));
+    const configPath = join(tempDir, "lumo.config.json");
+    const homeDir = join(tempDir, "home");
+    const authPath = join(homeDir, ".pi", "agent", "auth.json");
+
+    try {
+      await mkdir(join(homeDir, ".pi", "agent"), { recursive: true });
+      await writeFile(authPath, `${JSON.stringify({ openai: "existing-openai" }, null, 2)}\n`);
+
+      const exitCode = await runSetupCli([
+        "--non-interactive",
+        "--config",
+        configPath,
+        "--discord-enabled",
+        "false",
+        "--discord-inbound-mode",
+        "file",
+        "--terminal-alerts",
+        "false",
+        "--model-provider",
+        "skip",
+      ], {
+        env: {
+          HOME: homeDir,
+        },
+        output: createWriter(),
+        error: createWriter(),
+      });
+
+      assert.equal(exitCode, 0);
+      const authRaw = await readFile(authPath, "utf8");
+      assert.deepEqual(JSON.parse(authRaw), {
+        openai: "existing-openai",
+      });
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

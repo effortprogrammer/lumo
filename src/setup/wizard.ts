@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { stdin as defaultInput, stdout as defaultOutput } from "node:process";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   createDefaultConfig,
   type DeepPartial,
@@ -15,6 +15,46 @@ import {
 } from "../channels/discord-adapter.js";
 
 type DiscordInboundMode = LumoConfig["channels"]["adapters"]["discord"]["inbound"]["mode"];
+type SupervisorClient = Extract<
+  LumoConfig["supervisor"]["client"],
+  "anthropic-compatible" | "openai-compatible"
+>;
+type ModelProviderValue = "anthropic" | "openai" | "google" | "copilot" | "openrouter" | "skip";
+
+interface ModelProviderChoice extends SelectChoice<ModelProviderValue> {
+  authKey?: "anthropic" | "openai" | "google" | "openrouter";
+  requiresApiKey: boolean;
+  oauthLogin: boolean;
+}
+
+interface SupervisorSelection {
+  provider: SupervisorClient;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+const MODEL_PROVIDER_CHOICES = [
+  { label: "Anthropic (API key)", value: "anthropic", authKey: "anthropic", requiresApiKey: true, oauthLogin: false },
+  { label: "OpenAI (API key)", value: "openai", authKey: "openai", requiresApiKey: true, oauthLogin: false },
+  { label: "Google Gemini (API key)", value: "google", authKey: "google", requiresApiKey: true, oauthLogin: false },
+  { label: "GitHub Copilot (free, OAuth in pi)", value: "copilot", requiresApiKey: false, oauthLogin: true },
+  { label: "OpenRouter (API key)", value: "openrouter", authKey: "openrouter", requiresApiKey: true, oauthLogin: false },
+  { label: "Skip (configure later in pi)", value: "skip", requiresApiKey: false, oauthLogin: false },
+] as const satisfies readonly ModelProviderChoice[];
+
+const SUPERVISOR_DEFAULTS: Record<SupervisorClient, { baseUrl: string; apiKey: string; model: string }> = {
+  "anthropic-compatible": {
+    baseUrl: "https://api.anthropic.com/v1",
+    apiKey: "ANTHROPIC_API_KEY",
+    model: "claude-sonnet-4-20250514",
+  },
+  "openai-compatible": {
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "OPENAI_API_KEY",
+    model: "gpt-4o",
+  },
+};
 
 export interface SetupAnswers {
   configPath: string;
@@ -26,6 +66,9 @@ export interface SetupAnswers {
   allowedUsers: string[];
   mentionPrefix?: string;
   enableTerminalAlerts: boolean;
+  modelProvider: ModelProviderValue;
+  modelApiKey?: string;
+  supervisor?: SupervisorSelection;
 }
 
 export interface SetupCliOptions {
@@ -42,6 +85,12 @@ export interface SetupCliOptions {
   mentionPrefix?: string;
   enableTerminalAlerts?: string;
   discordGatewayHealthcheck?: string;
+  modelProvider?: string;
+  modelApiKey?: string;
+  supervisorProvider?: string;
+  supervisorBaseUrl?: string;
+  supervisorApiKey?: string;
+  supervisorModel?: string;
 }
 
 export interface SetupCliDependencies {
@@ -121,6 +170,12 @@ export function parseSetupCliArgs(
     mentionPrefix: env.LUMO_SETUP_DISCORD_MENTION_PREFIX,
     enableTerminalAlerts: env.LUMO_SETUP_TERMINAL_ALERTS,
     discordGatewayHealthcheck: env.LUMO_SETUP_DISCORD_GATEWAY_HEALTHCHECK,
+    modelProvider: env.LUMO_SETUP_MODEL_PROVIDER,
+    modelApiKey: env.LUMO_SETUP_MODEL_API_KEY,
+    supervisorProvider: env.LUMO_SETUP_SUPERVISOR_PROVIDER,
+    supervisorBaseUrl: env.LUMO_SETUP_SUPERVISOR_BASE_URL,
+    supervisorApiKey: env.LUMO_SETUP_SUPERVISOR_API_KEY,
+    supervisorModel: env.LUMO_SETUP_SUPERVISOR_MODEL,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -181,6 +236,24 @@ export function parseSetupCliArgs(
       case "discord-gateway-healthcheck":
         options.discordGatewayHealthcheck = next;
         break;
+      case "model-provider":
+        options.modelProvider = next;
+        break;
+      case "model-api-key":
+        options.modelApiKey = next;
+        break;
+      case "supervisor-provider":
+        options.supervisorProvider = next;
+        break;
+      case "supervisor-base-url":
+        options.supervisorBaseUrl = next;
+        break;
+      case "supervisor-api-key":
+        options.supervisorApiKey = next;
+        break;
+      case "supervisor-model":
+        options.supervisorModel = next;
+        break;
       default:
         throw new Error(`Unknown setup flag: --${key}`);
     }
@@ -219,6 +292,14 @@ export function resolveSetupAnswers(
     defaults.alerts.channels.terminal.enabled,
     "terminal alerts",
   );
+  const modelProvider = parseModelProvider(options.modelProvider);
+  const selectedProvider = getModelProviderChoice(modelProvider);
+  const modelApiKey = trimOptionalValue(options.modelApiKey);
+  if (selectedProvider.requiresApiKey && !modelApiKey) {
+    throw new Error(`Model API key is required when provider ${selectedProvider.label} is selected.`);
+  }
+
+  const supervisor = parseSupervisorSelection(options);
 
   if (discordEnabled && discordInboundMode === "gateway") {
     if (!tokenEnvVar) {
@@ -240,6 +321,9 @@ export function resolveSetupAnswers(
     allowedUsers,
     mentionPrefix,
     enableTerminalAlerts,
+    modelProvider,
+    modelApiKey,
+    supervisor,
   };
 }
 
@@ -256,8 +340,7 @@ export function buildSetupConfig(
     ...(answers.mentionPrefix ? { mentionPrefix: answers.mentionPrefix } : {}),
   };
   const discordWebhookEnabled = Boolean(answers.webhookUrl);
-
-  return {
+  const config: DeepPartial<LumoConfig> = {
     alerts: {
       enableTerminalBell: answers.enableTerminalAlerts,
       channels: {
@@ -281,6 +364,37 @@ export function buildSetupConfig(
       },
     },
   };
+
+  if (answers.supervisor) {
+    config.supervisor = {
+      client: answers.supervisor.provider,
+      model: answers.supervisor.model,
+      openaiCompatible: {
+        enabled: answers.supervisor.provider === "openai-compatible",
+      },
+      anthropicCompatible: {
+        enabled: answers.supervisor.provider === "anthropic-compatible",
+      },
+    };
+
+    if (answers.supervisor.provider === "anthropic-compatible") {
+      config.supervisor.anthropicCompatible = {
+        enabled: true,
+        baseUrl: answers.supervisor.baseUrl,
+        apiKey: answers.supervisor.apiKey,
+        model: answers.supervisor.model,
+      };
+    } else {
+      config.supervisor.openaiCompatible = {
+        enabled: true,
+        baseUrl: answers.supervisor.baseUrl,
+        apiKey: answers.supervisor.apiKey,
+        model: answers.supervisor.model,
+      };
+    }
+  }
+
+  return config;
 }
 
 export async function writeSetupConfig(
@@ -360,7 +474,12 @@ export async function runSetupCli(
           }
         },
     });
+    await maybeWritePiAuth({
+      answers,
+      env,
+    });
     writeLine(output, `Wrote config to ${result.path}`);
+    maybeWriteModelProviderFollowup(output, answers);
     await maybeRunDiscordGatewayHealthcheck({
       answers,
       options,
@@ -397,6 +516,12 @@ export function getSetupUsage(): string {
     "  --discord-allowed-users <csv>    Comma-separated allowed users",
     "  --discord-mention-prefix <text>  Optional required prefix for Discord messages",
     "  --terminal-alerts <bool>         true | false",
+    "  --model-provider <name>          anthropic | openai | google | openrouter | copilot | skip",
+    "  --model-api-key <key>            API key for the selected pi runtime provider",
+    "  --supervisor-provider <type>     anthropic-compatible | openai-compatible | none",
+    "  --supervisor-base-url <url>      Supervisor base URL override",
+    "  --supervisor-api-key <value>     Supervisor API key or env var name",
+    "  --supervisor-model <name>        Supervisor model identifier",
     "  --discord-gateway-healthcheck <bool> Run setup-time Discord gateway check",
     "",
     "Environment fallbacks use the same names prefixed with LUMO_SETUP_.",
@@ -418,7 +543,7 @@ async function runInteractiveWizard(
 
   try {
     writeLine(writer, "Welcome to Lumo setup.");
-    writeLine(writer, "This setup only configures Lumo-specific integrations.");
+    writeLine(writer, "This setup configures Lumo, pi runtime provider access, and optional supervisor settings.");
     writeLine(writer, "");
     const setupMode = await promptSelectValue(
       prompter,
@@ -430,7 +555,7 @@ async function runInteractiveWizard(
       "quickstart",
     );
     if (setupMode === "quickstart") {
-      const answers = buildQuickstartAnswers(options, defaults);
+      const answers = await buildQuickstartAnswers(prompter, options, defaults);
       writeLine(writer, "");
       writeLine(writer, formatQuickstartPreview(answers));
       const confirmed = await promptBooleanSelect(
@@ -513,6 +638,8 @@ async function runInteractiveWizard(
       "Enable terminal alerts",
       enableTerminalAlerts,
     );
+    const modelProviderSelection = await promptModelProviderSelection(prompter, options);
+    const supervisor = await promptSupervisorSelection(prompter, options);
 
     const answers = resolveSetupAnswers({
       ...options,
@@ -525,6 +652,12 @@ async function runInteractiveWizard(
       allowedUsers: allowedUsers.join(","),
       mentionPrefix,
       enableTerminalAlerts: String(enableTerminalAlerts),
+      modelProvider: modelProviderSelection.provider.value,
+      modelApiKey: modelProviderSelection.apiKey,
+      supervisorProvider: supervisor?.provider ?? "none",
+      supervisorBaseUrl: supervisor?.baseUrl,
+      supervisorApiKey: supervisor?.apiKey,
+      supervisorModel: supervisor?.model,
     });
 
     writeLine(writer, "");
@@ -908,16 +1041,19 @@ function normalizeSelectedIndex(index: number, optionCount: number): number {
 }
 
 function buildQuickstartAnswers(
+  prompter: SetupPrompter,
   options: SetupCliOptions,
   defaults: LumoConfig,
-): SetupAnswers {
-  return resolveSetupAnswers({
+): Promise<SetupAnswers> {
+  return promptModelProviderSelection(prompter, options).then((modelProviderSelection) => resolveSetupAnswers({
     ...options,
     configPath: options.configPath ?? "./lumo.config.json",
     discordEnabled: "false",
     discordInboundMode: defaults.channels.adapters.discord.inbound.mode,
     enableTerminalAlerts: String(defaults.alerts.channels.terminal.enabled),
-  }, defaults);
+    modelProvider: modelProviderSelection.provider.value,
+    modelApiKey: modelProviderSelection.apiKey,
+  }, defaults));
 }
 
 function formatQuickstartPreview(answers: SetupAnswers): string {
@@ -928,6 +1064,8 @@ function formatQuickstartPreview(answers: SetupAnswers): string {
     "Discord integration: disabled",
     "Discord webhook alerts: disabled",
     `Terminal alerts: ${answers.enableTerminalAlerts ? "enabled" : "disabled"}`,
+    `Model provider: ${formatModelProviderSummary(answers)}`,
+    `Supervisor: ${formatSupervisorSummary(answers)}`,
   ].join("\n");
 }
 
@@ -944,11 +1082,248 @@ export function formatSetupSummary(answers: SetupAnswers): string {
     `Allowed Discord users: ${formatListSummary(answers.allowedUsers)}`,
     `Mention prefix: ${answers.mentionPrefix ?? "(none)"}`,
     `Terminal alerts: ${answers.enableTerminalAlerts ? "Yes" : "No"}`,
+    `Model provider: ${formatModelProviderSummary(answers)}`,
+    `Supervisor: ${formatSupervisorSummary(answers)}`,
   ].join("\n");
+}
+
+function parseModelProvider(value: string | undefined): ModelProviderValue {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return "skip";
+  }
+
+  const matched = MODEL_PROVIDER_CHOICES.find((choice) => choice.value === normalized);
+  if (!matched) {
+    throw new Error(`Unsupported model provider: ${value}`);
+  }
+
+  return matched.value;
+}
+
+function getModelProviderChoice(value: ModelProviderValue): ModelProviderChoice {
+  const matched = MODEL_PROVIDER_CHOICES.find((choice) => choice.value === value);
+  if (!matched) {
+    throw new Error(`Unsupported model provider: ${value}`);
+  }
+
+  return matched;
+}
+
+async function promptModelProviderSelection(
+  prompter: SetupPrompter,
+  options: SetupCliOptions,
+): Promise<{ provider: ModelProviderChoice; apiKey?: string }> {
+  const providerValue = await promptSelectValue(
+    prompter,
+    "Model provider for pi runtime",
+    MODEL_PROVIDER_CHOICES,
+    parseModelProvider(options.modelProvider),
+  );
+  const provider = getModelProviderChoice(providerValue);
+  if (!provider.requiresApiKey) {
+    return { provider };
+  }
+
+  const configuredApiKey = trimOptionalValue(options.modelApiKey);
+  if (configuredApiKey) {
+    return {
+      provider,
+      apiKey: configuredApiKey,
+    };
+  }
+
+  const apiKey = requiredTrimmedValue(
+    await prompter.ask(`${provider.label.replace(" (API key)", "")} API key: `),
+    "model API key",
+  );
+
+  return {
+    provider,
+    apiKey,
+  };
+}
+
+async function promptSupervisorSelection(
+  prompter: SetupPrompter,
+  options: SetupCliOptions,
+): Promise<SupervisorSelection | undefined> {
+  const configureSupervisor = await promptSelectValue(
+    prompter,
+    "Configure supervisor model?",
+    [
+      { label: "Yes", value: "yes" },
+      { label: "No (use defaults)", value: "no" },
+    ],
+    parseSupervisorProviderValue(options.supervisorProvider) === "none" ? "no" : "yes",
+  );
+  if (configureSupervisor === "no") {
+    return undefined;
+  }
+
+  const provider = await promptSelectValue(
+    prompter,
+    "Supervisor provider",
+    [
+      { label: "Anthropic-compatible", value: "anthropic-compatible" },
+      { label: "OpenAI-compatible", value: "openai-compatible" },
+    ],
+    parseSupervisorProviderValue(options.supervisorProvider) === "none"
+      ? "anthropic-compatible"
+      : parseSupervisorProviderValue(options.supervisorProvider) as SupervisorClient,
+  );
+  const defaults = SUPERVISOR_DEFAULTS[provider];
+
+  return {
+    provider,
+    baseUrl: requiredTrimmedValue(
+      await promptWithDefault(
+        prompter,
+        "Base URL",
+        trimOptionalValue(options.supervisorBaseUrl) ?? defaults.baseUrl,
+      ),
+      "supervisor base URL",
+    ),
+    apiKey: requiredTrimmedValue(
+      await promptWithDefault(
+        prompter,
+        "API key (or env var name)",
+        trimOptionalValue(options.supervisorApiKey) ?? defaults.apiKey,
+      ),
+      "supervisor API key",
+    ),
+    model: requiredTrimmedValue(
+      await promptWithDefault(
+        prompter,
+        "Model",
+        trimOptionalValue(options.supervisorModel) ?? defaults.model,
+      ),
+      "supervisor model",
+    ),
+  };
+}
+
+function parseSupervisorProviderValue(value: string | undefined): SupervisorClient | "none" {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return "none";
+  }
+
+  if (normalized === "anthropic-compatible" || normalized === "openai-compatible") {
+    return normalized;
+  }
+
+  throw new Error(`Unsupported supervisor provider: ${value}`);
+}
+
+function parseSupervisorSelection(options: SetupCliOptions): SupervisorSelection | undefined {
+  const provider = parseSupervisorProviderValue(options.supervisorProvider);
+  if (provider === "none") {
+    return undefined;
+  }
+
+  const defaults = SUPERVISOR_DEFAULTS[provider];
+  return {
+    provider,
+    baseUrl: requiredTrimmedValue(
+      trimOptionalValue(options.supervisorBaseUrl) ?? defaults.baseUrl,
+      "supervisor base URL",
+    ),
+    apiKey: requiredTrimmedValue(
+      trimOptionalValue(options.supervisorApiKey) ?? defaults.apiKey,
+      "supervisor API key",
+    ),
+    model: requiredTrimmedValue(
+      trimOptionalValue(options.supervisorModel) ?? defaults.model,
+      "supervisor model",
+    ),
+  };
+}
+
+async function maybeWritePiAuth(options: {
+  answers: SetupAnswers;
+  env: Record<string, string | undefined>;
+}): Promise<void> {
+  const provider = getModelProviderChoice(options.answers.modelProvider);
+  if (!provider.authKey || !options.answers.modelApiKey) {
+    return;
+  }
+
+  const homeDir = requiredTrimmedValue(
+    options.env.HOME ?? process.env.HOME ?? "",
+    "HOME",
+  );
+  const authPath = join(homeDir, ".pi", "agent", "auth.json");
+  let existing: Record<string, unknown> = {};
+
+  try {
+    const raw = await readFile(authPath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (isRecord(parsed)) {
+      existing = parsed;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  await mkdir(dirname(authPath), { recursive: true });
+  await writeFile(
+    authPath,
+    `${JSON.stringify({
+      ...existing,
+      [provider.authKey]: options.answers.modelApiKey,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+function maybeWriteModelProviderFollowup(writer: TextWriter, answers: SetupAnswers): void {
+  const provider = getModelProviderChoice(answers.modelProvider);
+  if (provider.oauthLogin) {
+    writeLine(writer, "After setup, run /login in pi to complete OAuth.");
+  }
+}
+
+function formatModelProviderSummary(answers: SetupAnswers): string {
+  const provider = getModelProviderChoice(answers.modelProvider);
+  if (provider.value === "skip") {
+    return "Skip (configure later in pi)";
+  }
+
+  if (provider.oauthLogin) {
+    return `${provider.label} (/login required in pi)`;
+  }
+
+  return `${provider.label.replace(" (API key)", "")} (API key configured: ${maskSecret(answers.modelApiKey)})`;
+}
+
+function formatSupervisorSummary(answers: SetupAnswers): string {
+  return answers.supervisor
+    ? `${answers.supervisor.provider} (${answers.supervisor.model})`
+    : "defaults";
+}
+
+function maskSecret(value: string | undefined): string {
+  if (!value) {
+    return "(missing)";
+  }
+
+  if (value.length <= 4) {
+    return "*".repeat(value.length);
+  }
+
+  const tail = value.slice(-4);
+  return `${"*".repeat(value.length - 4)}${tail}`;
 }
 
 function formatListSummary(values: readonly string[]): string {
   return values.length > 0 ? values.join(", ") : "(none)";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function formatError(error: unknown): string {

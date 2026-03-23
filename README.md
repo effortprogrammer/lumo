@@ -61,13 +61,19 @@ lumo setup
 The setup wizard has two paths:
 
 - `Quickstart` creates a minimal local config
-- `Custom` lets you configure Discord integration and alerting
+- `Custom` lets you configure Discord integration, alerting, the pi runtime provider, and an optional supervisor model
 
 The guided setup currently focuses on Lumo-owned integrations such as:
 
 - Discord inbound configuration
 - Discord webhook alerts
 - terminal alerts
+- pi runtime model provider setup
+- optional supervisor model wiring for `lumo.config.json`
+
+Quickstart now also includes a pi model provider step so first-time installs do not stop at the runtime's "No model provider is configured yet" prompt. API-key based providers are written to `~/.pi/agent/auth.json`, while OAuth-based providers such as GitHub Copilot will prompt you to finish setup later with `/login` inside `pi`.
+
+Custom setup adds an optional supervisor section for either `anthropic-compatible` or `openai-compatible` clients and writes those settings into `lumo.config.json`.
 
 ## Discord setup
 
