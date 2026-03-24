@@ -3,6 +3,10 @@ import { type LumoEventBus } from "../event/bus.js";
 import { createDefaultAgentikaEventBus } from "../event/agentika-adapter.js";
 import { InProcessA2AAdapter } from "../a2a/in-process-adapter.js";
 import {
+  AgentikaA2AAdapter,
+  type AgentikaA2AAdapterOptions,
+} from "../a2a/agentika-adapter.js";
+import {
   type ActorProgressMessage,
   buildActorInterventionAckMessage,
   buildActorInterventionResultMessage,
@@ -26,7 +30,7 @@ import { createConfiguredSupervisorClient } from "../supervisor/model-client.js"
 import { buildSupervisorInputEnvelope } from "../supervisor/contracts.js";
 import { type LogBatch } from "../logging/log-batcher.js";
 import { type CommandRunner } from "./subprocess.js";
-import { createSupervisorTransport, type SupervisorTransport } from "../a2a/transport.js";
+import { type SupervisorTransport } from "../a2a/transport.js";
 import {
   SessionManager,
   type SessionRuntimeCallbacks,
@@ -77,6 +81,75 @@ export interface TaskPairRuntimeCallbacks {
   onStatusChange?: (pair: ManagedTaskPair, status: TaskStatus) => void;
 }
 
+type ManagedA2AAdapter = InProcessA2AAdapter | AgentikaA2AAdapter;
+
+class MutableSupervisorTransport implements SupervisorTransport {
+  private adapter: ManagedA2AAdapter;
+  private readonly progressHandlers = new Map<string, (message: A2AEnvelope<A2AMessage>) => Promise<void> | void>();
+  private readonly feedbackHandlers = new Map<string, (message: A2AEnvelope<A2AMessage>) => Promise<void> | void>();
+  private readonly haltHandlers = new Map<string, (request: A2AEnvelope<CancelTaskRequest>) => Promise<void> | void>();
+
+  constructor(adapter: ManagedA2AAdapter) {
+    this.adapter = adapter;
+  }
+
+  async sendProgress(envelope: A2AEnvelope<A2AMessage>): Promise<void> {
+    await this.adapter.sendMessage(envelope);
+  }
+
+  registerProgressHandler(
+    agentId: string,
+    handler: (message: A2AEnvelope<A2AMessage>) => Promise<void> | void,
+  ): void {
+    this.progressHandlers.set(agentId, handler);
+    this.adapter.registerMessageHandler(agentId, handler);
+  }
+
+  registerFeedbackHandler(
+    agentId: string,
+    handler: (message: A2AEnvelope<A2AMessage>) => Promise<void> | void,
+  ): void {
+    this.feedbackHandlers.set(agentId, handler);
+    this.adapter.registerMessageHandler(agentId, handler);
+  }
+
+  registerHaltHandler(
+    agentId: string,
+    handler: (request: A2AEnvelope<CancelTaskRequest>) => Promise<void> | void,
+  ): void {
+    this.haltHandlers.set(agentId, handler);
+    this.adapter.registerCancelHandler(agentId, handler);
+  }
+
+  reset(adapter: ManagedA2AAdapter): void {
+    this.stopCurrentAdapter();
+    this.adapter = adapter;
+    this.progressHandlers.clear();
+    this.feedbackHandlers.clear();
+    this.haltHandlers.clear();
+  }
+
+  swapAdapter(adapter: ManagedA2AAdapter): void {
+    this.stopCurrentAdapter();
+    this.adapter = adapter;
+    for (const [agentId, handler] of this.progressHandlers) {
+      this.adapter.registerMessageHandler(agentId, handler);
+    }
+    for (const [agentId, handler] of this.feedbackHandlers) {
+      this.adapter.registerMessageHandler(agentId, handler);
+    }
+    for (const [agentId, handler] of this.haltHandlers) {
+      this.adapter.registerCancelHandler(agentId, handler);
+    }
+  }
+
+  stopCurrentAdapter(): void {
+    if (this.adapter instanceof AgentikaA2AAdapter) {
+      this.adapter.stop();
+    }
+  }
+}
+
 export class TaskPairManager {
   private currentSupervisorInbox: ActorProgressMessage[] | null = null;
   private currentSupervisorInterventions: Array<SupervisorFeedbackMessage | SupervisorHaltMessage> | null = null;
@@ -88,17 +161,25 @@ export class TaskPairManager {
   private supervisorInterventionUnsubscribe: (() => void) | null = null;
   private readonly memoryContextCache = new Map<string, RetrievedMemoryContext>();
   private readonly reviewedSessions = new Set<string>();
+  private readonly transportController: MutableSupervisorTransport;
+  private readonly originalAdapter: InProcessA2AAdapter;
 
   private constructor(
+    private readonly config: LumoConfig,
     private readonly sessionManager: SessionManager,
-    private readonly supervisorTransport: SupervisorTransport,
-    private readonly transportAdapter: InProcessA2AAdapter | null,
+    supervisorTransport: MutableSupervisorTransport,
+    originalAdapter: InProcessA2AAdapter,
     private readonly now: () => string,
     private readonly supervisorEngine: SupervisorEngine,
     private readonly supervisorBootstrapper: SupervisorSessionBootstrapper,
     private readonly eventBus?: LumoEventBus,
     private readonly memoryHarness?: MemoryHarness,
-  ) {}
+    private readonly agentikaAdapterFactory: (options: AgentikaA2AAdapterOptions) => AgentikaA2AAdapter = (options) =>
+      new AgentikaA2AAdapter(options),
+  ) {
+    this.transportController = supervisorTransport;
+    this.originalAdapter = originalAdapter;
+  }
 
   static async create(
     config: LumoConfig,
@@ -109,25 +190,26 @@ export class TaskPairManager {
       supervisorBootstrapper?: SupervisorSessionBootstrapper;
       transportAdapter?: InProcessA2AAdapter;
       eventSink?: LumoEventBus;
+      agentikaAdapterFactory?: (options: AgentikaA2AAdapterOptions) => AgentikaA2AAdapter;
     },
   ): Promise<TaskPairManager> {
     const nowFn = now ?? (() => new Date().toISOString());
-    const transportAdapter = options?.transportAdapter ?? new InProcessA2AAdapter();
+    const originalAdapter = options?.transportAdapter ?? new InProcessA2AAdapter();
+    const transportController = new MutableSupervisorTransport(originalAdapter);
     const eventSink = options?.eventSink ?? createDefaultAgentikaEventBus();
-    const supervisorTransport = runtimeOptions.supervisorTransport
-      ?? createSupervisorTransport(transportAdapter);
     const useLocalSupervisor = options?.supervisorBootstrapper
       ? options.supervisorBootstrapper instanceof InProcessSupervisorSessionBootstrapper
       : true;
     const sessionManager = await SessionManager.create(config, runner, now, {
       ...runtimeOptions,
-      supervisorTransport,
+      supervisorTransport: runtimeOptions.supervisorTransport ?? transportController,
       enableLocalSupervisor: runtimeOptions.enableLocalSupervisor ?? useLocalSupervisor,
     });
     return new TaskPairManager(
+      config,
       sessionManager,
-      supervisorTransport,
-      transportAdapter,
+      transportController,
+      originalAdapter,
       nowFn,
       new SupervisorEngine({
         client: createConfiguredSupervisorClient(config),
@@ -137,6 +219,7 @@ export class TaskPairManager {
       eventSink
         ? new MemoryHarness(eventSink, nowFn)
         : undefined,
+      options?.agentikaAdapterFactory,
     );
   }
 
@@ -156,6 +239,7 @@ export class TaskPairManager {
     this.stopSupervisorLoop();
     this.supervisorInterventionUnsubscribe?.();
     this.supervisorInterventionUnsubscribe = null;
+    this.transportController.reset(this.originalAdapter);
     const supervisorInbox: ActorProgressMessage[] = [];
     const supervisorInterventions: Array<SupervisorFeedbackMessage | SupervisorHaltMessage> = [];
     const supervisorInterventionResults: ActorInterventionResultMessage[] = [];
@@ -190,7 +274,7 @@ export class TaskPairManager {
     });
     pair.pairState.supervisor.status = "bootstrapping";
     this.bootstrapSupervisorPair(pair, instruction);
-    this.supervisorTransport.registerProgressHandler(
+    this.transportController.registerProgressHandler(
       pair.supervisorAgentId,
       (envelope) => {
         const progress = extractActorProgress(envelope);
@@ -211,60 +295,59 @@ export class TaskPairManager {
         }
       },
     );
-    if (this.transportAdapter) {
-      this.transportAdapter.registerMessageHandler(pair.actorAgentId, (envelope) => {
-        const feedback = extractSupervisorFeedback(envelope);
-        if (!feedback) {
-          return;
-        }
-        supervisorInterventions.push(feedback);
-        pair.pairState.supervisor.lastDecision = feedback.decision;
-        pair.pairState.supervisor.lastEvaluatedAt = envelope.payload.sentAt;
-        void this.eventBus?.publish({
-          topic: `task.${pair.taskId}.events`,
-          type: "supervisor.intervention.issued",
-          source: "lumo.supervisor",
-          correlationId: pair.pairState.pairId,
-          idempotencyKey: feedback.interventionId,
-          payload: feedback as unknown as Record<string, unknown>,
-        });
-        if (pair.pairState.supervisor.mode === "separate_session") {
-          void this.sendSupervisorInterventionAck(pair, feedback.interventionId, true);
-          const nextInstruction = envelope.payload.parts.find((part): part is { kind: "text"; text: string } => part.kind === "text")?.text
-            ?? feedback.instructions?.join(" ")
-            ?? feedback.decision.suggestion
-            ?? feedback.decision.reason;
-          void this.sessionManager.followUp(nextInstruction)
-            .then(() => this.sendSupervisorInterventionResult(pair, feedback.interventionId, "applied", "Actor follow-up was queued successfully."))
-            .catch((error) =>
-              this.sendSupervisorInterventionResult(
-                pair,
-                feedback.interventionId,
-                "failed",
-                error instanceof Error ? error.message : String(error),
-              ));
-        }
+    this.transportController.registerFeedbackHandler(pair.actorAgentId, (envelope) => {
+      const feedback = extractSupervisorFeedback(envelope);
+      if (!feedback) {
+        return;
+      }
+      supervisorInterventions.push(feedback);
+      pair.pairState.supervisor.lastDecision = feedback.decision;
+      pair.pairState.supervisor.lastEvaluatedAt = envelope.payload.sentAt;
+      void this.eventBus?.publish({
+        topic: `task.${pair.taskId}.events`,
+        type: "supervisor.intervention.issued",
+        source: "lumo.supervisor",
+        correlationId: pair.pairState.pairId,
+        idempotencyKey: feedback.interventionId,
+        payload: feedback as unknown as Record<string, unknown>,
       });
-      this.transportAdapter.registerCancelHandler(pair.actorAgentId, (envelope) => {
-        const halt = extractSupervisorHalt(envelope);
-        supervisorInterventions.push(halt);
-        pair.pairState.supervisor.lastDecision = halt.decision;
-        pair.pairState.supervisor.lastEvaluatedAt = envelope.payload.requestedAt;
-        void this.eventBus?.publish({
-          topic: `task.${pair.taskId}.events`,
-          type: "supervisor.intervention.issued",
-          source: "lumo.supervisor",
-          correlationId: pair.pairState.pairId,
-          idempotencyKey: halt.interventionId,
-          payload: halt as unknown as Record<string, unknown>,
-        });
-        if (pair.pairState.supervisor.mode === "separate_session") {
-          void this.sendSupervisorInterventionAck(pair, halt.interventionId, true);
-          this.sessionManager.halt(envelope.payload.reason);
-          void this.sendSupervisorInterventionResult(pair, halt.interventionId, "applied", "Actor halt was applied.");
-        }
+      if (pair.pairState.supervisor.mode === "separate_session") {
+        void this.sendSupervisorInterventionAck(pair, feedback.interventionId, true);
+        const nextInstruction = envelope.payload.parts.find((part): part is { kind: "text"; text: string } => part.kind === "text")?.text
+          ?? feedback.instructions?.join(" ")
+          ?? feedback.decision.suggestion
+          ?? feedback.decision.reason;
+        void this.sessionManager.followUp(nextInstruction)
+          .then(() => this.sendSupervisorInterventionResult(pair, feedback.interventionId, "applied", "Actor follow-up was queued successfully."))
+          .catch((error) =>
+            this.sendSupervisorInterventionResult(
+              pair,
+              feedback.interventionId,
+              "failed",
+              error instanceof Error ? error.message : String(error),
+            ));
+      }
+    });
+    this.transportController.registerHaltHandler(pair.actorAgentId, (envelope) => {
+      const halt = extractSupervisorHalt(envelope);
+      supervisorInterventions.push(halt);
+      pair.pairState.supervisor.lastDecision = halt.decision;
+      pair.pairState.supervisor.lastEvaluatedAt = envelope.payload.requestedAt;
+      void this.eventBus?.publish({
+        topic: `task.${pair.taskId}.events`,
+        type: "supervisor.intervention.issued",
+        source: "lumo.supervisor",
+        correlationId: pair.pairState.pairId,
+        idempotencyKey: halt.interventionId,
+        payload: halt as unknown as Record<string, unknown>,
       });
-    }
+      if (pair.pairState.supervisor.mode === "separate_session") {
+        void this.sendSupervisorInterventionAck(pair, halt.interventionId, true);
+        this.sessionManager.halt(envelope.payload.reason);
+        void this.sendSupervisorInterventionResult(pair, halt.interventionId, "applied", "Actor halt was applied.");
+      }
+    });
+    this.maybePromoteTransportToAgentika(pair.taskId);
     this.startSupervisorLoop();
     return pair;
   }
@@ -698,7 +781,30 @@ export class TaskPairManager {
       reason,
     };
     this.stopSupervisorLoop();
+    this.transportController.stopCurrentAdapter();
     void this.reviewCompletedPair(pair, "completed");
+  }
+
+  private maybePromoteTransportToAgentika(taskId: string): void {
+    if (!this.config.agentika.enabled) {
+      return;
+    }
+
+    const adapter = this.agentikaAdapterFactory({
+      baseUrl: this.config.agentika.baseUrl,
+      token: this.config.agentika.token,
+      taskId,
+      pollIntervalMs: this.config.agentika.pollIntervalMs,
+    });
+    void adapter.start()
+      .then(() => {
+        this.transportController.swapAdapter(adapter);
+      })
+      .catch((error) => {
+        console.warn(
+          `[lumo.a2a] falling back to in-process A2A transport: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
   }
 
   private attachSeparateSupervisorInterventionListener(pair: ManagedTaskPair): void {

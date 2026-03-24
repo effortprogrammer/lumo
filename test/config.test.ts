@@ -243,6 +243,50 @@ describe("loadConfig", () => {
     assert.equal(config.supervisor.anthropicCompatible.apiKey, "ccapi-test-token");
   });
 
+  it("supports agentika A2A defaults and env overrides", () => {
+    const config = createDefaultConfig({
+      env: {
+        LUMO_AGENTIKA_A2A: "1",
+        LUMO_AGENTIKA_URL: "http://127.0.0.1:7201",
+        LUMO_AGENTIKA_TOKEN: "secret",
+        LUMO_AGENTIKA_POLL_INTERVAL_MS: "250",
+      },
+      resolveBinary: () => undefined,
+    });
+
+    assert.equal(config.agentika.enabled, true);
+    assert.equal(config.agentika.baseUrl, "http://127.0.0.1:7201");
+    assert.equal(config.agentika.token, "secret");
+    assert.equal(config.agentika.pollIntervalMs, 250);
+  });
+
+  it("merges agentika config file overrides", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lumo-config-agentika-"));
+    const configPath = join(tempDir, "lumo.config.json");
+
+    try {
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          agentika: {
+            enabled: true,
+            baseUrl: "http://127.0.0.1:7300",
+            token: "file-token",
+            pollIntervalMs: 333,
+          },
+        }),
+      );
+
+      const config = await loadConfig(configPath);
+      assert.equal(config.agentika.enabled, true);
+      assert.equal(config.agentika.baseUrl, "http://127.0.0.1:7300");
+      assert.equal(config.agentika.token, "file-token");
+      assert.equal(config.agentika.pollIntervalMs, 333);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("tolerates legacy actor.model-only overrides", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "lumo-config-model-migration-"));
     const configPath = join(tempDir, "lumo.config.json");
