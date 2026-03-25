@@ -193,7 +193,7 @@ export class AgentikaA2AAdapter implements A2AAgentAdapter {
     this.inFlightPolls.add(registrationKey);
     try {
       const response = await this.request(`/api/consumers/${encodeURIComponent(registration.consumerId)}/next?limit=5`, {
-        method: "POST",
+        method: "GET",
       });
       if (!response.ok) {
         throw new Error(`Failed to poll Agentika consumer ${registration.consumerId}: HTTP ${response.status} ${await response.text()}`);
