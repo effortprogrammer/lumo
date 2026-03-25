@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lumo.local/registry/manifest.schema.json",
+  "title": "Lumo CLI Registry Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "version",
+    "description",
+    "language",
+    "entrypoint",
+    "capabilities",
+    "auth",
+    "health",
+    "interface"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "language": {
+      "type": "string",
+      "enum": ["python"]
+    },
+    "entrypoint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "refresh_strategy"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["none", "cookie", "api-key", "oauth"]
+        },
+        "refresh_strategy": {
+          "type": "string",
+          "enum": ["none", "manual", "automatic"]
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "last_success",
+        "last_failure",
+        "consecutive_failures",
+        "failure_threshold"
+      ],
+      "properties": {
+        "last_success": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "last_failure": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "consecutive_failures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failure_threshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "interface": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["args", "flags", "description"],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
