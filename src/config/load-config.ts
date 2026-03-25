@@ -18,6 +18,12 @@ export interface CommandSpec {
 }
 
 export interface LumoConfig {
+  agentika: {
+    enabled: boolean;
+    baseUrl: string;
+    token: string;
+    pollIntervalMs: number;
+  };
   runtime: {
     provider: "pi";
     bootstrap: {
@@ -197,6 +203,12 @@ export function createDefaultConfig(
   });
 
   return {
+    agentika: {
+      enabled: parseBoolean(env.LUMO_AGENTIKA_A2A, false),
+      baseUrl: env.LUMO_AGENTIKA_URL ?? "http://127.0.0.1:7200",
+      token: env.LUMO_AGENTIKA_TOKEN ?? "dev",
+      pollIntervalMs: parsePositiveInteger(env.LUMO_AGENTIKA_POLL_INTERVAL_MS, 1_000),
+    },
     runtime: {
       provider: parseRuntimeProvider(env.LUMO_RUNTIME_PROVIDER),
       bootstrap: {
@@ -360,6 +372,10 @@ export function mergeConfig(
   overrides: DeepPartial<LumoConfig>,
 ): LumoConfig {
   return {
+    agentika: {
+      ...defaults.agentika,
+      ...overrides.agentika,
+    },
     runtime: {
       ...defaults.runtime,
       ...overrides.runtime,
