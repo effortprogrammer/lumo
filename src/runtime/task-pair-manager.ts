@@ -6,10 +6,13 @@ import {
   AgentikaA2AAdapter,
   type AgentikaA2AAdapterOptions,
 } from "../a2a/agentika-adapter.js";
+import { AgentikaBridge } from "../a2a/agentika-bridge.js";
 import {
   type ActorProgressMessage,
   buildActorInterventionAckMessage,
   buildActorInterventionResultMessage,
+  buildSupervisorFeedbackMessage,
+  buildSupervisorHaltMessage,
   type ActorInterventionResultMessage,
   type A2AMessage,
   type A2AEnvelope,
@@ -97,6 +100,14 @@ class MutableSupervisorTransport implements SupervisorTransport {
     await this.adapter.sendMessage(envelope);
   }
 
+  async sendFeedback(envelope: A2AEnvelope<A2AMessage>): Promise<void> {
+    await this.adapter.sendMessage(envelope);
+  }
+
+  async haltTask(envelope: A2AEnvelope<CancelTaskRequest>): Promise<void> {
+    await this.adapter.cancelTask(envelope);
+  }
+
   registerProgressHandler(
     agentId: string,
     handler: (message: A2AEnvelope<A2AMessage>) => Promise<void> | void,
@@ -163,6 +174,7 @@ export class TaskPairManager {
   private readonly reviewedSessions = new Set<string>();
   private readonly transportController: MutableSupervisorTransport;
   private readonly originalAdapter: InProcessA2AAdapter;
+  private agentikaBridge: AgentikaBridge | null = null;
 
   private constructor(
     private readonly config: LumoConfig,
@@ -239,6 +251,8 @@ export class TaskPairManager {
     this.stopSupervisorLoop();
     this.supervisorInterventionUnsubscribe?.();
     this.supervisorInterventionUnsubscribe = null;
+    this.agentikaBridge?.stop();
+    this.agentikaBridge = null;
     this.transportController.reset(this.originalAdapter);
     const supervisorInbox: ActorProgressMessage[] = [];
     const supervisorInterventions: Array<SupervisorFeedbackMessage | SupervisorHaltMessage> = [];
@@ -284,14 +298,20 @@ export class TaskPairManager {
           pair.pairState.supervisor.lastProgressAt = envelope.payload.sentAt;
           pair.pairState.supervisor.status = "observing";
           this.evaluateInterventionEffect(pair, progress);
-          void this.eventBus?.publish({
-            topic: `task.${pair.taskId}.events`,
-            type: "actor.progress",
-            source: "lumo.actor",
-            correlationId: pair.pairState.pairId,
-            idempotencyKey: progress.progressId,
-            payload: progress as unknown as Record<string, unknown>,
-          });
+          if (this.agentikaBridge) {
+            void this.agentikaBridge.publishActorProgress(envelope, {
+              shadowOnly: true,
+            });
+          } else {
+            void this.eventBus?.publish({
+              topic: `task.${pair.taskId}.events`,
+              type: "actor.progress",
+              source: "lumo.actor",
+              correlationId: pair.pairState.pairId,
+              idempotencyKey: progress.progressId,
+              payload: progress as unknown as Record<string, unknown>,
+            });
+          }
         }
       },
     );
@@ -311,22 +331,31 @@ export class TaskPairManager {
         idempotencyKey: feedback.interventionId,
         payload: feedback as unknown as Record<string, unknown>,
       });
+      const nextInstruction = envelope.payload.parts.find((part): part is { kind: "text"; text: string } => part.kind === "text")?.text
+        ?? feedback.instructions?.join(" ")
+        ?? feedback.decision.suggestion
+        ?? feedback.decision.reason;
       if (pair.pairState.supervisor.mode === "separate_session") {
         void this.sendSupervisorInterventionAck(pair, feedback.interventionId, true);
-        const nextInstruction = envelope.payload.parts.find((part): part is { kind: "text"; text: string } => part.kind === "text")?.text
-          ?? feedback.instructions?.join(" ")
-          ?? feedback.decision.suggestion
-          ?? feedback.decision.reason;
-        void this.sessionManager.followUp(nextInstruction)
-          .then(() => this.sendSupervisorInterventionResult(pair, feedback.interventionId, "applied", "Actor follow-up was queued successfully."))
-          .catch((error) =>
-            this.sendSupervisorInterventionResult(
+      }
+      void this.sessionManager.followUp(nextInstruction)
+        .then(() => {
+          if (pair.pairState.supervisor.mode === "separate_session") {
+            return this.sendSupervisorInterventionResult(pair, feedback.interventionId, "applied", "Actor follow-up was queued successfully.");
+          }
+          return undefined;
+        })
+        .catch((error) => {
+          if (pair.pairState.supervisor.mode === "separate_session") {
+            return this.sendSupervisorInterventionResult(
               pair,
               feedback.interventionId,
               "failed",
               error instanceof Error ? error.message : String(error),
-            ));
-      }
+            );
+          }
+          return undefined;
+        });
     });
     this.transportController.registerHaltHandler(pair.actorAgentId, (envelope) => {
       const halt = extractSupervisorHalt(envelope);
@@ -341,9 +370,9 @@ export class TaskPairManager {
         idempotencyKey: halt.interventionId,
         payload: halt as unknown as Record<string, unknown>,
       });
+      this.sessionManager.halt(envelope.payload.reason);
       if (pair.pairState.supervisor.mode === "separate_session") {
         void this.sendSupervisorInterventionAck(pair, halt.interventionId, true);
-        this.sessionManager.halt(envelope.payload.reason);
         void this.sendSupervisorInterventionResult(pair, halt.interventionId, "applied", "Actor halt was applied.");
       }
     });
@@ -535,6 +564,8 @@ export class TaskPairManager {
     pair.supervisorOutputs.push(output);
     pair.pairState.supervisor.lastOutput = output;
     pair.pairState.supervisor.lastEvaluatedAt = this.now();
+    await this.publishSupervisorDecisionEvent(pair, output);
+    await this.dispatchSupervisorDecision(pair, output, latestProgress?.progressId);
     if (output.decision.action === "complete") {
       this.finalizePair(pair, output.decision.reason);
     }
@@ -781,6 +812,8 @@ export class TaskPairManager {
       reason,
     };
     this.stopSupervisorLoop();
+    this.agentikaBridge?.stop();
+    this.agentikaBridge = null;
     this.transportController.stopCurrentAdapter();
     void this.reviewCompletedPair(pair, "completed");
   }
@@ -796,15 +829,184 @@ export class TaskPairManager {
       taskId,
       pollIntervalMs: this.config.agentika.pollIntervalMs,
     });
+    const bridge = new AgentikaBridge({
+      adapter,
+      taskId,
+      eventSink: this.eventBus,
+    });
+    this.agentikaBridge = bridge;
     void adapter.start()
       .then(() => {
+        if (this.agentikaBridge !== bridge) {
+          adapter.stop();
+          return;
+        }
         this.transportController.swapAdapter(adapter);
       })
       .catch((error) => {
+        if (this.agentikaBridge === bridge) {
+          this.agentikaBridge = null;
+        }
         console.warn(
           `[lumo.a2a] falling back to in-process A2A transport: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
+  }
+
+  private async dispatchSupervisorDecision(
+    pair: ManagedTaskPair,
+    output: SupervisorOutputEnvelope,
+    inResponseToProgressId?: string,
+  ): Promise<void> {
+    if (output.decision.action === "continue" || output.decision.action === "complete") {
+      return;
+    }
+
+    if (output.decision.action === "feedback") {
+      const envelope = this.buildFeedbackEnvelope(pair, output, inResponseToProgressId);
+      if (this.agentikaBridge) {
+        await this.agentikaBridge.publishSupervisorDecision(envelope, output.decision, {
+          emitEvent: false,
+        });
+        return;
+      }
+      await this.transportController.sendFeedback(envelope);
+      return;
+    }
+
+    const envelope = this.buildCancelEnvelope(pair, output, inResponseToProgressId);
+    if (this.agentikaBridge) {
+      await this.agentikaBridge.publishSupervisorDecision(envelope, output.decision, {
+        emitEvent: false,
+      });
+      return;
+    }
+    await this.transportController.haltTask(envelope);
+  }
+
+  private async publishSupervisorDecisionEvent(
+    pair: ManagedTaskPair,
+    output: SupervisorOutputEnvelope,
+  ): Promise<void> {
+    const envelope = {
+      id: `decision-${pair.taskId}-${pair.supervisorOutputs.length}`,
+      from: pair.supervisorAgentId,
+      to: pair.actorAgentId,
+      pairId: pair.pairState.pairId,
+      sentAt: this.now(),
+      payload: {
+        id: `decision-message-${pair.taskId}-${pair.supervisorOutputs.length}`,
+        taskId: pair.taskId,
+        role: "system" as const,
+        parts: [
+          {
+            kind: "json" as const,
+            data: {
+              ...output.decision,
+              occurredAt: this.now(),
+            },
+          },
+        ],
+        sentAt: this.now(),
+      },
+    };
+    if (this.agentikaBridge) {
+      await this.agentikaBridge.publishSupervisorDecision(envelope, output.decision, {
+        shadowOnly: true,
+      });
+      return;
+    }
+    await this.eventBus?.publish({
+      topic: `task.${pair.taskId}.events`,
+      type: "supervisor.decision",
+      source: "lumo.supervisor",
+      correlationId: pair.pairState.pairId,
+      idempotencyKey: envelope.id,
+      payload: {
+        ...output.decision,
+        occurredAt: envelope.sentAt,
+      },
+    });
+  }
+
+  private buildFeedbackEnvelope(
+    pair: ManagedTaskPair,
+    output: SupervisorOutputEnvelope,
+    inResponseToProgressId?: string,
+  ): A2AEnvelope<A2AMessage> {
+    const interventionId = `feedback-${pair.taskId}-${Date.now()}`;
+    const instructions = output.recoveryPlan?.instructions;
+    const feedback = buildSupervisorFeedbackMessage({
+      interventionId,
+      actorSessionId: pair.session.runtime.sessionId,
+      inResponseToProgressId,
+      decision: output.decision,
+      bottleneckKind: output.bottleneck?.kind,
+      targetPhase: output.recoveryPlan?.targetPhase,
+      instructions,
+      shouldEscalateHuman: output.shouldEscalateHuman,
+    });
+    return {
+      id: interventionId,
+      from: pair.supervisorAgentId,
+      to: pair.actorAgentId,
+      pairId: pair.pairState.pairId,
+      taskId: pair.taskId,
+      sessionId: pair.session.runtime.sessionId,
+      correlationId: interventionId,
+      causationId: inResponseToProgressId,
+      sentAt: this.now(),
+      payload: {
+        id: `msg-${pair.taskId}-${Date.now()}`,
+        taskId: pair.taskId,
+        role: "system",
+        parts: [
+          {
+            kind: "text",
+            text: output.decision.suggestion ?? output.decision.reason,
+          },
+          {
+            kind: "json",
+            data: feedback,
+          },
+        ],
+        sentAt: this.now(),
+      },
+    };
+  }
+
+  private buildCancelEnvelope(
+    pair: ManagedTaskPair,
+    output: SupervisorOutputEnvelope,
+    inResponseToProgressId?: string,
+  ): A2AEnvelope<CancelTaskRequest> {
+    const interventionId = `halt-${pair.taskId}-${Date.now()}`;
+    const halt = buildSupervisorHaltMessage({
+      interventionId,
+      actorSessionId: pair.session.runtime.sessionId,
+      inResponseToProgressId,
+      decision: output.decision,
+      bottleneckKind: output.bottleneck?.kind,
+      humanActionNeeded: output.shouldEscalateHuman,
+      recoverySummary: output.recoveryPlan?.summary,
+    });
+    return {
+      id: interventionId,
+      from: pair.supervisorAgentId,
+      to: pair.actorAgentId,
+      pairId: pair.pairState.pairId,
+      taskId: pair.taskId,
+      sessionId: pair.session.runtime.sessionId,
+      correlationId: interventionId,
+      causationId: inResponseToProgressId,
+      sentAt: this.now(),
+      payload: {
+        taskId: pair.taskId,
+        reason: output.decision.suggestion ?? output.decision.reason,
+        requestedAt: this.now(),
+        details: halt,
+      },
+    };
   }
 
   private attachSeparateSupervisorInterventionListener(pair: ManagedTaskPair): void {

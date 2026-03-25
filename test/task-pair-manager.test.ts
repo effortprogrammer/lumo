@@ -162,6 +162,68 @@ describe("TaskPairManager", () => {
     assert.equal(pair.supervisorOutputs.length >= 1, true);
   });
 
+  it("sends observation feedback decisions back into the actor session", async () => {
+    const client = new AvailablePiMonoClient();
+    const manager = await TaskPairManager.create(createDefaultConfig(), undefined, undefined, {
+      healthCheck: () => true,
+      piMonoClient: client,
+    });
+    const pair = manager.createPair("inspect the browser workflow");
+    const externalSessionId = `external-${pair.session.runtime.sessionId}`;
+    client.emit(externalSessionId, {
+      type: "session.started",
+      taskId: pair.taskId,
+      startedAt: "2026-03-16T11:00:00Z",
+    });
+    client.emit(externalSessionId, {
+      type: "task.output",
+      taskId: pair.taskId,
+      occurredAt: "2026-03-16T11:00:01Z",
+      tool: "agent-browser",
+      input: "get title",
+      output: "OpenAI Careers",
+      durationMs: 5,
+      exitCode: 0,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const evaluateCalls: number[] = [];
+    (manager as unknown as {
+      supervisorEngine: {
+        evaluate(input: unknown): Promise<{
+          decision: {
+            status: "warning";
+            confidence: number;
+            reason: string;
+            suggestion: string;
+            action: "feedback";
+          };
+        }>;
+      };
+    }).supervisorEngine = {
+      async evaluate(input) {
+        evaluateCalls.push(1);
+        return {
+          input,
+          decision: {
+            status: "warning",
+            confidence: 0.9,
+            reason: "Need to synthesize now",
+            suggestion: "Stop browsing and draft the answer",
+            action: "feedback",
+          },
+        };
+      },
+    };
+
+    await manager.observeCurrentPair();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(evaluateCalls.length, 1);
+    assert.ok(client.sendInputs.some((input) => input.includes("Stop browsing and draft the answer")));
+    assert.equal(pair.supervisorInterventions.at(-1)?.type, "supervisor-feedback");
+  });
+
   it("shadow-writes supervisor decisions during observation", async () => {
     const client = new AvailablePiMonoClient();
     const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
