@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { type LumoConfig } from "../config/load-config.js";
 import { type LumoEventBus } from "./bus.js";
 import {
   type LumoEventBusCapabilities,
@@ -12,16 +13,12 @@ import {
 } from "./types.js";
 
 interface AgentikaAdapterOptions {
-  binaryPath?: string;
-  baseUrl?: string;
-  dataDir?: string;
-  token?: string;
   fetchImpl?: typeof fetch;
   spawnImpl?: typeof spawn;
 }
 
 export class AgentikaEventBusAdapter implements LumoEventBus {
-  private readonly binaryPath: string;
+  private readonly binaryPath: string | null;
   private readonly baseUrl: string;
   private readonly dataDir: string;
   private readonly token: string;
@@ -32,11 +29,14 @@ export class AgentikaEventBusAdapter implements LumoEventBus {
   private started = false;
   private readonly ensuredTopics = new Set<string>();
 
-  constructor(options: AgentikaAdapterOptions = {}) {
-    this.binaryPath = options.binaryPath ?? "/tmp/agentika/target/release/agentika";
-    this.baseUrl = options.baseUrl ?? "http://127.0.0.1:7200";
-    this.dataDir = options.dataDir ?? resolve(process.cwd(), ".lumo-agentika");
-    this.token = options.token ?? "dev";
+  constructor(
+    config: LumoConfig["agentika"],
+    options: AgentikaAdapterOptions = {},
+  ) {
+    this.binaryPath = config.binaryPath;
+    this.baseUrl = config.baseUrl;
+    this.dataDir = resolve(process.cwd(), config.dataDir);
+    this.token = config.token;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.spawnImpl = options.spawnImpl ?? spawn;
     this.port = new URL(this.baseUrl).port || "7200";
@@ -153,6 +153,15 @@ export class AgentikaEventBusAdapter implements LumoEventBus {
       return;
     }
 
+    if (!this.binaryPath) {
+      const response = await this.fetchImpl(`${this.baseUrl}/readyz`);
+      if (!response.ok) {
+        throw new Error(`Agentika server is not ready at ${this.baseUrl}: HTTP ${response.status}`);
+      }
+      this.started = true;
+      return;
+    }
+
     if (!existsSync(this.binaryPath)) {
       throw new Error(`Agentika binary not found at ${this.binaryPath}`);
     }
@@ -209,9 +218,11 @@ export class AgentikaEventBusAdapter implements LumoEventBus {
   }
 }
 
-export function createDefaultAgentikaEventBus(): LumoEventBus | undefined {
-  if (process.env.LUMO_AGENTIKA_SHADOW !== "1") {
+export function createAgentikaEventBus(
+  config: LumoConfig["agentika"],
+): LumoEventBus | undefined {
+  if (!config.eventBus) {
     return undefined;
   }
-  return new AgentikaEventBusAdapter();
+  return new AgentikaEventBusAdapter(config);
 }

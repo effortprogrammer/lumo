@@ -247,17 +247,51 @@ describe("loadConfig", () => {
     const config = createDefaultConfig({
       env: {
         LUMO_AGENTIKA_A2A: "1",
+        LUMO_AGENTIKA_EVENT_BUS: "0",
         LUMO_AGENTIKA_URL: "http://127.0.0.1:7201",
         LUMO_AGENTIKA_TOKEN: "secret",
         LUMO_AGENTIKA_POLL_INTERVAL_MS: "250",
+        LUMO_AGENTIKA_BINARY: " /tmp/agentika ",
+        LUMO_AGENTIKA_DATA_DIR: " .custom-agentika ",
       },
       resolveBinary: () => undefined,
     });
 
     assert.equal(config.agentika.enabled, true);
+    assert.equal(config.agentika.eventBus, false);
     assert.equal(config.agentika.baseUrl, "http://127.0.0.1:7201");
     assert.equal(config.agentika.token, "secret");
     assert.equal(config.agentika.pollIntervalMs, 250);
+    assert.equal(config.agentika.binaryPath, "/tmp/agentika");
+    assert.equal(config.agentika.dataDir, ".custom-agentika");
+  });
+
+  it("defaults agentika event bus to the A2A enabled value", () => {
+    const enabledConfig = createDefaultConfig({
+      env: {
+        LUMO_AGENTIKA_A2A: "1",
+      },
+      resolveBinary: () => undefined,
+    });
+    const disabledConfig = createDefaultConfig({
+      env: {},
+      resolveBinary: () => undefined,
+    });
+
+    assert.equal(enabledConfig.agentika.eventBus, true);
+    assert.equal(disabledConfig.agentika.eventBus, false);
+  });
+
+  it("supports legacy agentika shadow env var as an event bus alias", () => {
+    const config = createDefaultConfig({
+      env: {
+        LUMO_AGENTIKA_SHADOW: "1",
+      },
+      resolveBinary: () => undefined,
+    });
+
+    assert.equal(config.agentika.enabled, false);
+    assert.equal(config.agentika.eventBus, true);
   });
 
   it("merges agentika config file overrides", async () => {
@@ -270,18 +304,24 @@ describe("loadConfig", () => {
         JSON.stringify({
           agentika: {
             enabled: true,
+            eventBus: true,
             baseUrl: "http://127.0.0.1:7300",
             token: "file-token",
             pollIntervalMs: 333,
+            binaryPath: "/opt/agentika",
+            dataDir: ".agentika-store",
           },
         }),
       );
 
       const config = await loadConfig(configPath);
       assert.equal(config.agentika.enabled, true);
+      assert.equal(config.agentika.eventBus, true);
       assert.equal(config.agentika.baseUrl, "http://127.0.0.1:7300");
       assert.equal(config.agentika.token, "file-token");
       assert.equal(config.agentika.pollIntervalMs, 333);
+      assert.equal(config.agentika.binaryPath, "/opt/agentika");
+      assert.equal(config.agentika.dataDir, ".agentika-store");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

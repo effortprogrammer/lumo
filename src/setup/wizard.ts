@@ -69,6 +69,10 @@ export interface SetupAnswers {
   modelProvider: ModelProviderValue;
   modelApiKey?: string;
   supervisor?: SupervisorSelection;
+  agentikaEnabled: boolean;
+  agentikaUrl: string;
+  agentikaToken: string;
+  agentikaBinaryPath?: string;
 }
 
 export interface SetupCliOptions {
@@ -91,6 +95,10 @@ export interface SetupCliOptions {
   supervisorBaseUrl?: string;
   supervisorApiKey?: string;
   supervisorModel?: string;
+  agentikaEnabled?: string;
+  agentikaUrl?: string;
+  agentikaToken?: string;
+  agentikaBinary?: string;
 }
 
 export interface SetupCliDependencies {
@@ -176,6 +184,10 @@ export function parseSetupCliArgs(
     supervisorBaseUrl: env.LUMO_SETUP_SUPERVISOR_BASE_URL,
     supervisorApiKey: env.LUMO_SETUP_SUPERVISOR_API_KEY,
     supervisorModel: env.LUMO_SETUP_SUPERVISOR_MODEL,
+    agentikaEnabled: env.LUMO_SETUP_AGENTIKA_ENABLED,
+    agentikaUrl: env.LUMO_SETUP_AGENTIKA_URL,
+    agentikaToken: env.LUMO_SETUP_AGENTIKA_TOKEN,
+    agentikaBinary: env.LUMO_SETUP_AGENTIKA_BINARY,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -254,6 +266,18 @@ export function parseSetupCliArgs(
       case "supervisor-model":
         options.supervisorModel = next;
         break;
+      case "agentika-enabled":
+        options.agentikaEnabled = next;
+        break;
+      case "agentika-url":
+        options.agentikaUrl = next;
+        break;
+      case "agentika-token":
+        options.agentikaToken = next;
+        break;
+      case "agentika-binary":
+        options.agentikaBinary = next;
+        break;
       default:
         throw new Error(`Unknown setup flag: --${key}`);
     }
@@ -300,6 +324,20 @@ export function resolveSetupAnswers(
   }
 
   const supervisor = parseSupervisorSelection(options);
+  const agentikaEnabled = parseBooleanInput(
+    options.agentikaEnabled,
+    defaults.agentika.enabled,
+    "agentika enablement",
+  );
+  const agentikaUrl = requiredTrimmedValue(
+    trimOptionalValue(options.agentikaUrl) ?? defaults.agentika.baseUrl,
+    "agentika url",
+  );
+  const agentikaToken = requiredTrimmedValue(
+    trimOptionalValue(options.agentikaToken) ?? defaults.agentika.token,
+    "agentika token",
+  );
+  const agentikaBinaryPath = trimOptionalValue(options.agentikaBinary);
 
   if (discordEnabled && discordInboundMode === "gateway") {
     if (!tokenEnvVar) {
@@ -324,6 +362,10 @@ export function resolveSetupAnswers(
     modelProvider,
     modelApiKey,
     supervisor,
+    agentikaEnabled,
+    agentikaUrl,
+    agentikaToken,
+    agentikaBinaryPath,
   };
 }
 
@@ -393,6 +435,18 @@ export function buildSetupConfig(
       };
     }
   }
+
+  config.agentika = {
+    enabled: answers.agentikaEnabled,
+    eventBus: answers.agentikaEnabled,
+    ...(answers.agentikaEnabled
+      ? {
+          baseUrl: answers.agentikaUrl,
+          token: answers.agentikaToken,
+          ...(answers.agentikaBinaryPath ? { binaryPath: answers.agentikaBinaryPath } : {}),
+        }
+      : {}),
+  };
 
   return config;
 }
@@ -522,6 +576,10 @@ export function getSetupUsage(): string {
     "  --supervisor-base-url <url>      Supervisor base URL override",
     "  --supervisor-api-key <value>     Supervisor API key or env var name",
     "  --supervisor-model <name>        Supervisor model identifier",
+    "  --agentika-enabled <bool>        true | false",
+    "  --agentika-url <url>             Agentika server URL",
+    "  --agentika-token <value>         Agentika auth token",
+    "  --agentika-binary <path>         Agentika binary path for auto-start",
     "  --discord-gateway-healthcheck <bool> Run setup-time Discord gateway check",
     "",
     "Environment fallbacks use the same names prefixed with LUMO_SETUP_.",
@@ -640,6 +698,44 @@ async function runInteractiveWizard(
     );
     const modelProviderSelection = await promptModelProviderSelection(prompter, options);
     const supervisor = await promptSupervisorSelection(prompter, options);
+    const agentikaEnabled = await promptBoolean(
+      prompter,
+      "Enable agentika event bus",
+      parseBooleanInput(
+        options.agentikaEnabled,
+        defaults.agentika.enabled,
+        "agentika enablement",
+      ),
+    );
+    const agentikaUrl = agentikaEnabled
+      ? requiredTrimmedValue(
+          await promptWithDefault(
+            prompter,
+            "Agentika server URL",
+            trimOptionalValue(options.agentikaUrl) ?? defaults.agentika.baseUrl,
+          ),
+          "agentika server URL",
+        )
+      : defaults.agentika.baseUrl;
+    const agentikaToken = agentikaEnabled
+      ? requiredTrimmedValue(
+          await promptWithDefault(
+            prompter,
+            "Auth token",
+            trimOptionalValue(options.agentikaToken) ?? defaults.agentika.token,
+          ),
+          "agentika auth token",
+        )
+      : defaults.agentika.token;
+    const agentikaBinaryPath = agentikaEnabled
+      ? trimOptionalValue(
+          await promptWithDefault(
+            prompter,
+            "Path to agentika binary (leave empty for external server)",
+            trimOptionalValue(options.agentikaBinary) ?? "",
+          ),
+        )
+      : undefined;
 
     const answers = resolveSetupAnswers({
       ...options,
@@ -658,6 +754,10 @@ async function runInteractiveWizard(
       supervisorBaseUrl: supervisor?.baseUrl,
       supervisorApiKey: supervisor?.apiKey,
       supervisorModel: supervisor?.model,
+      agentikaEnabled: String(agentikaEnabled),
+      agentikaUrl,
+      agentikaToken,
+      agentikaBinary: agentikaBinaryPath,
     });
 
     writeLine(writer, "");
@@ -1053,6 +1153,9 @@ function buildQuickstartAnswers(
     enableTerminalAlerts: String(defaults.alerts.channels.terminal.enabled),
     modelProvider: modelProviderSelection.provider.value,
     modelApiKey: modelProviderSelection.apiKey,
+    agentikaEnabled: String(defaults.agentika.enabled),
+    agentikaUrl: defaults.agentika.baseUrl,
+    agentikaToken: defaults.agentika.token,
   }, defaults));
 }
 
@@ -1066,6 +1169,7 @@ function formatQuickstartPreview(answers: SetupAnswers): string {
     `Terminal alerts: ${answers.enableTerminalAlerts ? "enabled" : "disabled"}`,
     `Model provider: ${formatModelProviderSummary(answers)}`,
     `Supervisor: ${formatSupervisorSummary(answers)}`,
+    `Agentika: ${formatAgentikaSummary(answers)}`,
   ].join("\n");
 }
 
@@ -1084,6 +1188,7 @@ export function formatSetupSummary(answers: SetupAnswers): string {
     `Terminal alerts: ${answers.enableTerminalAlerts ? "Yes" : "No"}`,
     `Model provider: ${formatModelProviderSummary(answers)}`,
     `Supervisor: ${formatSupervisorSummary(answers)}`,
+    `Agentika: ${formatAgentikaSummary(answers)}`,
   ].join("\n");
 }
 
@@ -1303,6 +1408,14 @@ function formatSupervisorSummary(answers: SetupAnswers): string {
   return answers.supervisor
     ? `${answers.supervisor.provider} (${answers.supervisor.model})`
     : "defaults";
+}
+
+function formatAgentikaSummary(answers: SetupAnswers): string {
+  if (!answers.agentikaEnabled) {
+    return "disabled";
+  }
+
+  return `${answers.agentikaUrl} (event bus enabled${answers.agentikaBinaryPath ? `, binary: ${answers.agentikaBinaryPath}` : ", external server"})`;
 }
 
 function maskSecret(value: string | undefined): string {

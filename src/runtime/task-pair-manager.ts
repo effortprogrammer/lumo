@@ -1,6 +1,6 @@
 import { type LumoConfig } from "../config/load-config.js";
 import { type LumoEventBus } from "../event/bus.js";
-import { createDefaultAgentikaEventBus } from "../event/agentika-adapter.js";
+import { createAgentikaEventBus } from "../event/agentika-adapter.js";
 import { InProcessA2AAdapter } from "../a2a/in-process-adapter.js";
 import {
   AgentikaA2AAdapter,
@@ -196,7 +196,7 @@ export class TaskPairManager {
     const nowFn = now ?? (() => new Date().toISOString());
     const originalAdapter = options?.transportAdapter ?? new InProcessA2AAdapter();
     const transportController = new MutableSupervisorTransport(originalAdapter);
-    const eventSink = options?.eventSink ?? createDefaultAgentikaEventBus();
+    const eventSink = options?.eventSink ?? createAgentikaEventBus(config.agentika);
     const useLocalSupervisor = options?.supervisorBootstrapper
       ? options.supervisorBootstrapper instanceof InProcessSupervisorSessionBootstrapper
       : true;

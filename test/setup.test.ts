@@ -69,6 +69,10 @@ describe("setup wizard", () => {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
 
       assert.deepEqual(parsed, {
+        agentika: {
+          enabled: false,
+          eventBus: false,
+        },
         alerts: {
           enableTerminalBell: true,
           channels: {
@@ -264,6 +268,10 @@ describe("setup wizard", () => {
         apiKey: "ANTHROPIC_API_KEY",
         model: "claude-sonnet-4-20250514",
       },
+      agentikaEnabled: true,
+      agentikaUrl: "http://127.0.0.1:7200",
+      agentikaToken: "dev",
+      agentikaBinaryPath: "/tmp/agentika",
     });
 
     assert.match(summary, /^Setup summary/m);
@@ -271,6 +279,7 @@ describe("setup wizard", () => {
     assert.match(summary, /Allowed Discord channels: \(none\)/);
     assert.match(summary, /Model provider: Anthropic \(API key configured: .*1234\)/);
     assert.match(summary, /Supervisor: anthropic-compatible \(claude-sonnet-4-20250514\)/);
+    assert.match(summary, /Agentika: http:\/\/127\.0\.0\.1:7200 \(event bus enabled, binary: \/tmp\/agentika\)/);
   });
 
   it("shows a summary and stops before writing when final confirmation is declined", async () => {
@@ -500,8 +509,8 @@ describe("setup wizard", () => {
         error: createWriter(),
         createPrompter: () =>
           createScriptedPrompter({
-            asks: ["", "", "", ""],
-            selects: [1, 1, 1, 5, 0, 1, 0],
+            asks: ["", "", "", "", "", "", ""],
+            selects: [1, 1, 1, 5, 0, 1, 0, 0],
           }),
       });
 
@@ -510,6 +519,12 @@ describe("setup wizard", () => {
       const raw = await readFile(configPath, "utf8");
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       assert.deepEqual(parsed, {
+        agentika: {
+          enabled: true,
+          eventBus: true,
+          baseUrl: "http://127.0.0.1:7200",
+          token: "dev",
+        },
         alerts: {
           enableTerminalBell: false,
           channels: {
@@ -635,6 +650,41 @@ describe("setup wizard", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("parses non-interactive agentika setup flags", () => {
+    const options = parseSetupCliArgs([
+      "--non-interactive",
+      "--config",
+      "./lumo.config.json",
+      "--discord-enabled",
+      "false",
+      "--discord-inbound-mode",
+      "file",
+      "--terminal-alerts",
+      "false",
+      "--agentika-enabled",
+      "true",
+      "--agentika-url",
+      " http://localhost:9876 ",
+      "--agentika-token",
+      " dev-token ",
+      "--agentika-binary",
+      " /opt/agentika ",
+    ]);
+
+    const answers = resolveSetupAnswers(options);
+    assert.equal(answers.agentikaEnabled, true);
+    assert.equal(answers.agentikaUrl, "http://localhost:9876");
+    assert.equal(answers.agentikaToken, "dev-token");
+    assert.equal(answers.agentikaBinaryPath, "/opt/agentika");
+    assert.deepEqual(buildSetupConfig(answers).agentika, {
+      enabled: true,
+      eventBus: true,
+      baseUrl: "http://localhost:9876",
+      token: "dev-token",
+      binaryPath: "/opt/agentika",
+    });
   });
 });
 
