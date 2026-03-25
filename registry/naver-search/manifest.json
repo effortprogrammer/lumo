@@ -1,0 +1,40 @@
+{
+  "name": "naver-search",
+  "version": "1.0.0",
+  "description": "Naver web/news/shop search via public search pages",
+  "language": "python",
+  "entrypoint": "cli.py",
+  "capabilities": ["web-search", "news-search", "shop-search"],
+  "auth": {
+    "type": "none",
+    "refresh_strategy": "none"
+  },
+  "health": {
+    "last_success": null,
+    "last_failure": null,
+    "consecutive_failures": 0,
+    "failure_threshold": 3
+  },
+  "interface": {
+    "search": {
+      "args": ["query"],
+      "flags": ["--type web|news|shop", "--limit N", "--json"],
+      "description": "Search Naver"
+    },
+    "health": {
+      "args": [],
+      "flags": ["--json"],
+      "description": "Check if CLI is working"
+    },
+    "capabilities": {
+      "args": [],
+      "flags": ["--json"],
+      "description": "List supported capabilities"
+    },
+    "status": {
+      "args": [],
+      "flags": ["--json"],
+      "description": "Show runtime status"
+    }
+  }
+}

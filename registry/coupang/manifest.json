@@ -1,0 +1,45 @@
+{
+  "name": "coupang",
+  "version": "1.0.0",
+  "description": "Coupang product search and product detail via public web pages",
+  "language": "python",
+  "entrypoint": "cli.py",
+  "capabilities": ["search", "product-detail", "price"],
+  "auth": {
+    "type": "cookie",
+    "refresh_strategy": "manual"
+  },
+  "health": {
+    "last_success": null,
+    "last_failure": null,
+    "consecutive_failures": 0,
+    "failure_threshold": 3
+  },
+  "interface": {
+    "search": {
+      "args": ["query"],
+      "flags": ["--limit N", "--json"],
+      "description": "Search Coupang products"
+    },
+    "get": {
+      "args": ["product_id"],
+      "flags": ["--json"],
+      "description": "Fetch product detail"
+    },
+    "health": {
+      "args": [],
+      "flags": ["--json"],
+      "description": "Check if CLI is working"
+    },
+    "capabilities": {
+      "args": [],
+      "flags": ["--json"],
+      "description": "List supported capabilities"
+    },
+    "status": {
+      "args": [],
+      "flags": ["--json"],
+      "description": "Show runtime status"
+    }
+  }
+}
