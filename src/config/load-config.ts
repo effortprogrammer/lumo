@@ -20,9 +20,12 @@ export interface CommandSpec {
 export interface LumoConfig {
   agentika: {
     enabled: boolean;
+    eventBus: boolean;
     baseUrl: string;
     token: string;
     pollIntervalMs: number;
+    binaryPath: string | null;
+    dataDir: string;
   };
   runtime: {
     provider: "pi";
@@ -201,13 +204,22 @@ export function createDefaultConfig(
     cwd,
     env,
   });
+  const agentikaEnabled = parseBoolean(env.LUMO_AGENTIKA_A2A, false);
+  const legacyAgentikaShadowEnabled = parseBoolean(
+    env.LUMO_AGENTIKA_SHADOW,
+    agentikaEnabled,
+  );
+  const agentikaBinaryPath = trimOptionalString(env.LUMO_AGENTIKA_BINARY);
 
   return {
     agentika: {
-      enabled: parseBoolean(env.LUMO_AGENTIKA_A2A, false),
+      enabled: agentikaEnabled,
+      eventBus: parseBoolean(env.LUMO_AGENTIKA_EVENT_BUS, legacyAgentikaShadowEnabled),
       baseUrl: env.LUMO_AGENTIKA_URL ?? "http://127.0.0.1:7200",
       token: env.LUMO_AGENTIKA_TOKEN ?? "dev",
       pollIntervalMs: parsePositiveInteger(env.LUMO_AGENTIKA_POLL_INTERVAL_MS, 1_000),
+      binaryPath: agentikaBinaryPath ?? null,
+      dataDir: trimOptionalString(env.LUMO_AGENTIKA_DATA_DIR) ?? ".lumo-agentika",
     },
     runtime: {
       provider: parseRuntimeProvider(env.LUMO_RUNTIME_PROVIDER),
@@ -602,6 +614,11 @@ function parseStringList(value: string | undefined): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function trimOptionalString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function parseBootstrapCommands(
