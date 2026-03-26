@@ -193,6 +193,7 @@ interface PiMonoSessionAdapterOptions {
   now?: () => string;
   supervisorTransport?: SupervisorTransport;
   enableLocalSupervisor?: boolean;
+  registryPath?: string;
 }
 
 interface PiMonoSessionRecord {
@@ -257,6 +258,7 @@ export class PiMonoSessionAdapter implements RuntimeSessionAdapter {
       cwd: process.cwd(),
       tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
       appendSystemPrompt: buildPiBrowserExecutionPolicyPrompt(options.config.actor.systemPrompt),
+      registryPath: options.registryPath ?? options.config.runtime.registryPath,
       now: this.now,
     });
   }
@@ -1108,6 +1110,7 @@ export interface RuntimeAdapterSelectionOptions {
   healthCheck?: () => boolean;
   sleep?: (ms: number) => Promise<void>;
   cwd?: string;
+  registryPath?: string;
 }
 
 export interface PiMonoBootstrapCommandAttempt {
@@ -1137,6 +1140,7 @@ export async function initializePiMonoRuntimeSessionAdapter(
     now: options.now,
     supervisorTransport: options.supervisorTransport,
     enableLocalSupervisor: options.enableLocalSupervisor,
+    registryPath: options.registryPath,
   });
 
   const healthCheck = options.healthCheck ?? (() => piMono.isAvailable());

@@ -29,6 +29,7 @@ export interface LumoConfig {
   };
   runtime: {
     provider: "pi";
+    registryPath?: string;
     bootstrap: {
       enabled: boolean;
       commands: string[];
@@ -223,6 +224,7 @@ export function createDefaultConfig(
     },
     runtime: {
       provider: parseRuntimeProvider(env.LUMO_RUNTIME_PROVIDER),
+      registryPath: trimOptionalString(env.LUMO_RUNTIME_REGISTRY_PATH) ?? resolve(cwd, "registry"),
       bootstrap: {
         enabled: parseBoolean(env.LUMO_RUNTIME_AUTO_BOOTSTRAP, true),
         commands: parseBootstrapCommands(

@@ -216,6 +216,7 @@ export class TaskPairManager {
       ...runtimeOptions,
       supervisorTransport: runtimeOptions.supervisorTransport ?? transportController,
       enableLocalSupervisor: runtimeOptions.enableLocalSupervisor ?? useLocalSupervisor,
+      registryPath: runtimeOptions.registryPath ?? config.runtime.registryPath,
     });
     return new TaskPairManager(
       config,
