@@ -45,12 +45,24 @@ export * from "./runtime/pi-supervisor-session-bootstrapper.js";
 
 import { loadConfig } from "./config/load-config.js";
 import { launchPiCli } from "./runtime/pi-cli-launch.js";
+import { SessionManager, type SessionRuntimeCallbacks } from "./runtime/session-manager.js";
 import { runSetupCli } from "./setup/wizard.js";
+
+interface ReadableStdin {
+  isTTY?: boolean;
+  [Symbol.asyncIterator](): AsyncIterableIterator<unknown>;
+}
+
+interface WritableStreamLike {
+  write: (text: string) => void;
+}
 
 export function getCliUsage(): string {
   return [
-    "Usage: lumo [config-path]",
-    "       lumo <command>",
+    "Usage: lumo <task-instruction>",
+    "       lumo [config.json] <task-instruction>",
+    "       lumo --config my-config.json <task-instruction>",
+    "       echo 'task' | lumo",
     "",
     "Commands:",
     "  init                       Run guided first-time setup",
@@ -62,6 +74,28 @@ export function getCliUsage(): string {
     "  - If the config file is missing, Lumo launches guided setup automatically.",
     "  - After setup, Lumo launches the pi CLI.",
   ].join("\n");
+}
+
+async function readInstructionFromStdin(): Promise<string> {
+  const stdin = process.stdin as ReadableStdin;
+  const chunks: Buffer[] = [];
+  for await (const chunk of stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString("utf8").trim();
+}
+
+function isTerminalStatus(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "halted";
+}
+
+function writeStdout(text: string): void {
+  const stdout = process.stdout as WritableStreamLike | undefined;
+  stdout?.write(text);
+}
+
+function writeStderr(text: string): void {
+  console.error(text.trimEnd());
 }
 
 export async function main(): Promise<void> {
@@ -78,7 +112,19 @@ export async function main(): Promise<void> {
       return;
     }
 
-    const configPath = args[0] ?? "lumo.config.json";
+    const defaultConfigPath = "lumo.config.json";
+    let configPath: string;
+    let instructionArgs: string[];
+
+    // If first arg looks like a config file, use it; otherwise auto-detect
+    if (args.length > 0 && (args[0].endsWith(".json") || args[0] === "--config")) {
+      configPath = args[0] === "--config" ? args[1] ?? defaultConfigPath : args[0];
+      instructionArgs = args[0] === "--config" ? args.slice(2) : args.slice(1);
+    } else {
+      configPath = defaultConfigPath;
+      instructionArgs = args;
+    }
+
     if (!existsSync(configPath)) {
       console.log(`No config found at ${configPath}. Launching setup...`);
       const setupExitCode = await runSetupCli(["--config", configPath]);
@@ -90,7 +136,76 @@ export async function main(): Promise<void> {
     }
 
     const config = await loadConfig(configPath);
-    process.exitCode = await launchPiCli(config);
+    let instruction = instructionArgs.join(" ").trim();
+    const stdin = process.stdin as ReadableStdin;
+    if (!instruction && !stdin.isTTY) {
+      instruction = await readInstructionFromStdin();
+    }
+
+    if (!instruction) {
+      writeStderr("Usage: lumo <task-instruction>");
+      writeStderr("       echo 'task' | lumo");
+      process.exitCode = 1;
+      return;
+    }
+
+    let sessionManager: SessionManager;
+    try {
+      sessionManager = await SessionManager.create(config);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeStderr(`Lumo runtime unavailable: ${message}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const callbacks: SessionRuntimeCallbacks = {
+      onConversation: (turn) => {
+        if (turn.role !== "actor" || !turn.text.trim()) {
+          return;
+        }
+        writeStdout(`${turn.text}\n`);
+      },
+      onDecision: (decision) => {
+        writeStderr(
+          `supervisor: ${decision.status} | ${decision.action} | ${decision.reason}\n`,
+        );
+      },
+      onSupervisorOutput: (output) => {
+        if (!output.recoveryPlan?.instructions.length) {
+          return;
+        }
+        writeStderr(
+          `supervisor intervention: ${output.recoveryPlan.instructions.join("; ")}\n`,
+        );
+      },
+      onLog: (record) => {
+        if (process.env.LUMO_DEBUG !== "1") {
+          return;
+        }
+        writeStderr(
+          `[tool:${record.tool}] step=${record.step} status=${record.status} input=${(record.input ?? "").slice(0, 80)}\n`,
+        );
+      },
+      onStatusChange: (status) => {
+        writeStderr(`status: ${status}\n`);
+      },
+    };
+
+    const session = sessionManager.createTask(instruction, callbacks);
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        const taskStatus = session.runtime.task.task.status;
+        const actorStatus = session.pairState.actor.status;
+        if (!isTerminalStatus(taskStatus) && !isTerminalStatus(actorStatus)) {
+          return;
+        }
+        clearInterval(check);
+        const terminalStatus = isTerminalStatus(taskStatus) ? taskStatus : actorStatus;
+        process.exitCode = terminalStatus === "completed" ? 0 : 1;
+        resolve();
+      }, 2000);
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Lumo startup failed: ${message}`);
