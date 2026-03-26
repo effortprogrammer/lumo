@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 export * from "./a2a/in-process-adapter.js";
+export * from "./a2a/agentika-bridge.js";
 export * from "./a2a/protocol.js";
 export * from "./a2a/transport.js";
 export * from "./alerts/dispatcher.js";
