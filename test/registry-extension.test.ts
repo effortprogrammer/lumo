@@ -52,7 +52,7 @@ describe("pi-agent-registry-extension", () => {
       assert.match(file.source, /Search alpha/);
       assert.match(file.source, /Get beta product/);
       // Verify the template that constructs tool names
-      assert.match(file.source, /\$\{manifest\.name\}\.\$\{command\}/);
+      assert.match(file.source, /\$\{manifest\.name\}_\$\{command\}/);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
