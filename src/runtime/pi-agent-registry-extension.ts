@@ -77,12 +77,13 @@ function manifestsToTools(manifests) {
       Object.keys(manifest.interface)
         .sort()
         .map((command) => ({
-          name: \`\${manifest.name}.\${command}\`,
+          name: \`\${manifest.name}_\${command}\`,
           description: manifest.interface[command].description,
           inputSchema: interfaceToProperties(manifest, command),
           metadata: {
             registryCli: manifest.name,
             command,
+            positionalArgs: manifest.interface[command].args,
           },
         })),
     );
@@ -98,15 +99,21 @@ function schemaPropertyToTypeBox(key, property) {
   return Type.String({ description: property.description || \`\${key} parameter\` });
 }
 
-function paramsToCliArgs(params) {
-  return Object.entries(params || {})
-    .filter(([, value]) => value !== undefined && value !== null && value !== false)
-    .flatMap(([key, value]) => {
-      if (value === true) {
-        return [\`--\${key}\`];
-      }
-      return [\`--\${key}\`, String(value)];
-    });
+function paramsToCliArgs(params, positionalArgNames) {
+  const result = [];
+  const entries = Object.entries(params || {}).filter(
+    ([, value]) => value !== undefined && value !== null && value !== false,
+  );
+  for (const [key, value] of entries) {
+    if (positionalArgNames.includes(key)) {
+      result.push(String(value));
+    } else if (value === true) {
+      result.push(\`--\${key}\`);
+    } else {
+      result.push(\`--\${key}\`, String(value));
+    }
+  }
+  return result;
 }
 
 export default async function (pi) {
@@ -127,7 +134,7 @@ export default async function (pi) {
         ),
       ),
       async execute(toolCallId, params, signal, onUpdate) {
-        const cliArgs = paramsToCliArgs(params);
+        const cliArgs = paramsToCliArgs(params, toolDef.metadata.positionalArgs);
         onUpdate?.({
           content: [{ type: "text", text: \`Running \${toolDef.metadata.registryCli} \${toolDef.metadata.command} \${cliArgs.join(" ")}\` }],
         });
