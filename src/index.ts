@@ -116,10 +116,13 @@ export async function main(): Promise<void> {
     let configPath: string;
     let instructionArgs: string[];
 
-    // If first arg looks like a config file, use it; otherwise auto-detect
-    if (args.length > 0 && (args[0].endsWith(".json") || args[0] === "--config")) {
-      configPath = args[0] === "--config" ? args[1] ?? defaultConfigPath : args[0];
-      instructionArgs = args[0] === "--config" ? args.slice(2) : args.slice(1);
+    // If first arg is a --config flag or an existing .json file, treat as config path
+    if (args.length > 0 && args[0] === "--config") {
+      configPath = args[1] ?? defaultConfigPath;
+      instructionArgs = args.slice(2);
+    } else if (args.length > 0 && args[0].endsWith(".json") && existsSync(args[0])) {
+      configPath = args[0];
+      instructionArgs = args.slice(1);
     } else {
       configPath = defaultConfigPath;
       instructionArgs = args;
