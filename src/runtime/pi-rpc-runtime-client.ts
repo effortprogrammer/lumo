@@ -1,10 +1,14 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBinaryCommand, resolveBinaryCommandFromModule } from "./command-resolution.js";
 import { type RuntimeAnomaly } from "../domain/task.js";
 import { type PiMonoRuntimeClient, type PiMonoRuntimeEvent } from "./runtime-session-adapter.js";
+import {
+  createPiAgentRegistryExtensionFile,
+  resolvePiAgentRegistryExtensionBaseDir,
+} from "./pi-agent-registry-extension.js";
 
 interface PiRpcRuntimeClientOptions {
   cwd?: string;
@@ -14,6 +18,7 @@ interface PiRpcRuntimeClientOptions {
   appendSystemPrompt?: string;
   tools?: string[];
   extensions?: string[];
+  registryPath?: string;
 }
 
 type PiRpcCommand =
@@ -118,7 +123,9 @@ export class PiRpcRuntimeClient implements PiMonoRuntimeClient {
   private readonly appendSystemPrompt?: string;
   private readonly tools?: string[];
   private readonly extensions?: string[];
+  private readonly registryPath?: string;
   private readonly agentBrowserBinary?: string;
+  private readonly tempRegistryExtensionDir?: string;
   private readonly sessions = new Map<string, SessionProcessRecord>();
   private readonly resolvedCli;
   private nextRequestId = 0;
@@ -130,9 +137,22 @@ export class PiRpcRuntimeClient implements PiMonoRuntimeClient {
     this.model = options.model?.trim() || undefined;
     this.appendSystemPrompt = options.appendSystemPrompt?.trim() || undefined;
     this.tools = options.tools && options.tools.length > 0 ? [...options.tools] : undefined;
-    this.extensions = options.extensions && options.extensions.length > 0
-      ? [...options.extensions]
-      : [fileURLToPath(new URL("./pi-agent-browser-extension.js", import.meta.url))];
+    this.registryPath = options.registryPath?.trim()
+      ? resolve(this.cwd, options.registryPath)
+      : undefined;
+    const browserExtension = fileURLToPath(new URL("./pi-agent-browser-extension.js", import.meta.url));
+    const extensions = [browserExtension];
+    if (this.registryPath) {
+      const registryExtension = createPiAgentRegistryExtensionFile(this.registryPath, {
+        baseDir: resolvePiAgentRegistryExtensionBaseDir(),
+      });
+      this.tempRegistryExtensionDir = registryExtension.directoryPath;
+      extensions.push(registryExtension.extensionPath);
+    }
+    if (options.extensions && options.extensions.length > 0) {
+      extensions.push(...options.extensions);
+    }
+    this.extensions = extensions;
     this.agentBrowserBinary = resolveBinaryCommand(DEFAULT_AGENT_BROWSER_CANDIDATES, {
       cwd: this.cwd,
       env: this.env,
@@ -145,6 +165,12 @@ export class PiRpcRuntimeClient implements PiMonoRuntimeClient {
     }) ?? resolveBinaryCommandFromModule(["pi"], import.meta.url, {
       env: this.env,
     });
+  }
+
+  dispose(): void {
+    if (this.tempRegistryExtensionDir && existsSync(this.tempRegistryExtensionDir)) {
+      rmSync(this.tempRegistryExtensionDir, { recursive: true, force: true });
+    }
   }
 
   isAvailable(): boolean {
